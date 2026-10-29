@@ -8,6 +8,11 @@ const browser=await chromium.connectOverCDP('http://127.0.0.1:9223');
 const page=browser.contexts().flatMap(c=>c.pages()).find(p=>p.url().includes('1420'));
 assert.ok(page,'The native localTEX webview must be open');
 await page.waitForSelector('.brand');
+// Fresh app data means first launch: setup runs against the real TeX installation.
+const setup=page.getByRole('dialog',{name:/^(LaTeX is ready|LaTeX setup needs attention)$/});
+await setup.waitFor({timeout:15*60_000});
+assert.equal(await setup.getAttribute('aria-label'),'LaTeX is ready',await setup.innerText());
+await setup.getByRole('button',{name:'Start writing'}).click();
 const invoke=(command,args={})=>page.evaluate(({command,args})=>window.__TAURI_INTERNALS__.invoke(command,args),{command,args});
 const parent=resolve('.cache/native-projects');await mkdir(parent,{recursive:true});
 const directory=await invoke('create_project',{parent,name:`Smoke বাংলা ${Date.now()}`,template:'article'});
@@ -33,6 +38,11 @@ const untrusted=await invoke('refresh_project',{projectId:project.id});assert.eq
 await invoke('save_settings',{settings:{recent:[directory],toolDirectory:null}});
 await page.reload();await page.getByRole('button').filter({hasText:project.name}).click();
 await page.getByRole('textbox',{name:'LaTeX source editor'}).waitFor();
+// A finished setup is remembered, so the reload must not show it again.
+assert.equal(await page.getByRole('dialog').count(),0);
+await page.getByRole('button',{name:/^Compile/}).click();
+await page.locator('.pdf-page canvas').waitFor({timeout:5*60_000});
+await page.getByText('PDF is up to date').waitFor();
 await page.screenshot({path:'.cache/native-workspace.png'});
-console.log('Native smoke passed: project creation/open, file read/save/conflict, traversal rejection, rename, settings, recovery, indexing, local trust, and UI project loading.');
+console.log('Native smoke passed: first-launch LaTeX setup, remembered setup, project creation/open, file read/save/conflict, traversal rejection, rename, settings, recovery, indexing, local trust, UI project loading, and a real compile to PDF.');
 await browser.close();

@@ -1,7 +1,9 @@
 //! Explicitly opt in: these tests require a fully initialized TeX installation.
 use localtex_core::{
-    paths::tool_path,
-    process::{apply_path, command, configure_latexmk, executable, output_timeout},
+    paths::{long_path, short_path, tool_path},
+    process::{
+        apply_path, command, configure_latexmk, executable, is_miktex, output_timeout, Installer,
+    },
 };
 use std::{fs, time::Duration};
 
@@ -32,8 +34,18 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
     .unwrap();
     fs::write(root.join("references.bib"),r"@book{knuth1984,author={Donald E. Knuth},title={The TeXbook},year={1984},publisher={Addison-Wesley}}").unwrap();
     let directory = std::env::var("LOCALTEX_TOOL_DIRECTORY").ok();
-    let figure = configure_latexmk(&directory, engine, &root, "figure.tex", None, false).unwrap();
-    let (success, log) = output_timeout(figure, Duration::from_secs(90)).unwrap();
+    let installer = Installer::new(is_miktex(&directory, engine).unwrap(), false);
+    let figure = configure_latexmk(
+        &directory,
+        engine,
+        &root,
+        "figure.tex",
+        None,
+        false,
+        installer,
+    )
+    .unwrap();
+    let (success, log) = output_timeout(figure, Duration::from_secs(600)).unwrap();
     assert!(success, "{engine}: {log}");
     let main = configure_latexmk(
         &directory,
@@ -42,6 +54,7 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
         "main.tex",
         Some(".localtex/build"),
         false,
+        installer,
     )
     .unwrap();
     let (success, log) = output_timeout(main, Duration::from_secs(90)).unwrap();
@@ -58,17 +71,34 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
         !final_log.contains("Citation `knuth1984' on page 1 undefined"),
         "{final_log}"
     );
-    let mut sync = command(executable(&directory, "synctex"));
-    apply_path(&mut sync, &directory);
-    sync.current_dir(tool_path(&root)).args([
-        "view",
-        "-i",
-        &format!("5:0:{}", tool_path(&root.join("main.tex"))),
-        "-o",
-        &tool_path(&output.join("main.pdf")),
-    ]);
-    let (ok, result) = output_timeout(sync, Duration::from_secs(10)).unwrap();
+    let synctex = |args: &[&str]| {
+        let mut sync = command(executable(&directory, "synctex"));
+        apply_path(&mut sync, &directory);
+        sync.current_dir(tool_path(&root)).args(args);
+        output_timeout(sync, Duration::from_secs(10)).unwrap()
+    };
+    let pdf = tool_path(&output.join("main.pdf"));
+    // Same lookup as the app: MiKTeX records non-ASCII paths in 8.3 form.
+    let source = tool_path(&root.join("main.tex"));
+    let view = |input: &str| synctex(&["view", "-i", &format!("5:0:{input}"), "-o", &pdf]);
+    let (mut ok, mut result) = view(&source);
+    if !result.contains("Page:") {
+        if let Some(short) = short_path(&source) {
+            (ok, result) = view(&short);
+        }
+    }
     assert!(ok && result.contains("Page:"), "{result}");
+    let (ok, result) = synctex(&["edit", "-o", &format!("1:100:120:{pdf}")]);
+    let input = result
+        .lines()
+        .find_map(|line| line.strip_prefix("Input:"))
+        .unwrap_or_else(|| panic!("{result}"));
+    assert!(ok);
+    let real = long_path(input.trim()).unwrap();
+    assert!(
+        real.contains("Research বাংলা with spaces"),
+        "{input} -> {real}"
+    );
     // A failed rebuild must be observable rather than treated as a fresh PDF.
     fs::write(root.join("chapter.tex"), r"\undefinedLocaltexCommand").unwrap();
     let broken = configure_latexmk(
@@ -78,6 +108,7 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
         "main.tex",
         Some(".localtex/build"),
         false,
+        installer,
     )
     .unwrap();
     let (ok, result) = output_timeout(broken, Duration::from_secs(90)).unwrap();

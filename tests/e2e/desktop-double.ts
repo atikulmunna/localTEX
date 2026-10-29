@@ -1,0 +1,126 @@
+import type { Page } from "@playwright/test";
+
+// Replaces Tauri's IPC with an in-page double, so desktop flows run in the browser.
+// These are frontend integration checks; they do not claim native execution.
+export async function installDesktopDouble(
+  page: Page,
+  options: { setupComplete?: boolean } = {},
+) {
+  await page.addInitScript((options) => {
+    const w = window as any;
+    w.isTauri = true;
+    const callbacks = new Map<number, Function>();
+    const listeners = new Map<string, number>();
+    let next = 1;
+    const document = {
+      path: "main.tex",
+      text: "\\documentclass{article}\n\\begin{document}Hello\\end{document}",
+      revision: "1",
+    };
+    const project = {
+      id: "test",
+      name: "Auto test",
+      directory: "D:/Auto test",
+      roots: ["main.tex"],
+      files: [{ path: "main.tex", size: 80, editable: true }],
+      config: {
+        version: 1,
+        root: "main.tex",
+        engine: "pdflatex",
+        shellEscape: false,
+      },
+    };
+    w.testIPC = {
+      calls: [],
+      builds: [],
+      setups: [],
+      conflict: false,
+      setupStatus: {
+        complete: options.setupComplete ?? true,
+        running: false,
+        distribution: "MiKTeX 26.5",
+        miktex: true,
+      },
+      emit(event: string, payload: unknown) {
+        callbacks.get(listeners.get(event)!)?.({ payload });
+      },
+      output(text: string) {
+        const build = this.builds.at(-1);
+        this.emit("build-event", {
+          projectId: "test",
+          buildId: build.buildId,
+          kind: "output",
+          success: false,
+          text,
+        });
+      },
+      finish() {
+        const build = this.builds.at(-1);
+        this.emit("build-event", {
+          projectId: "test",
+          buildId: build.buildId,
+          kind: "finished",
+          success: false,
+          text: "Build failed",
+        });
+      },
+      setup(event: object) {
+        this.emit("setup-event", { runId: this.setups.at(-1).runId, ...event });
+      },
+    };
+    w.__TAURI_INTERNALS__ = {
+      metadata: {
+        currentWindow: { label: "main" },
+        currentWebview: { label: "main" },
+      },
+      transformCallback(callback: Function) {
+        const id = next++;
+        callbacks.set(id, callback);
+        return id;
+      },
+      unregisterCallback(id: number) {
+        callbacks.delete(id);
+      },
+      async invoke(command: string, args: any) {
+        w.testIPC.calls.push(command);
+        if (command === "load_settings")
+          return { recent: ["D:/Auto test"], toolDirectory: null };
+        if (command === "plugin:event|listen") {
+          listeners.set(args.event, args.handler);
+          return next++;
+        }
+        if (command === "setup_status") return w.testIPC.setupStatus;
+        if (command === "start_setup") {
+          w.testIPC.setups.push(args);
+          return;
+        }
+        if (command === "open_project" || command === "refresh_project")
+          return project;
+        if (command === "index_project") return [{ ...document }];
+        if (command === "load_drafts") return [];
+        if (command === "read_file") return { ...document };
+        if (command === "save_file") {
+          if (w.testIPC.conflict)
+            throw new Error("CONFLICT: external file changed");
+          Object.assign(document, args.document, {
+            revision: String(Number(document.revision) + 1),
+          });
+          return document.revision;
+        }
+        if (command === "start_build")
+          w.testIPC.builds.push({ ...args, text: document.text });
+      },
+    };
+  }, options);
+}
+
+/** What the frontend has asked the desktop double to do so far. */
+export const recorded = (page: Page) =>
+  page.evaluate(() => {
+    const t = (window as any).testIPC;
+    return {
+      calls: t.calls as string[],
+      builds: t.builds as Record<string, any>[],
+      setups: t.setups as Record<string, any>[],
+    };
+  });

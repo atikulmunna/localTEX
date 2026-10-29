@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open, save, confirm } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl as openUrlInBrowser } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { EditorView } from "@codemirror/view";
 import {
-  ArrowDownToLine,
   ArrowRight,
   BookOpen,
   Check,
@@ -20,12 +19,16 @@ import {
   Hash,
   ListTree,
   Loader2,
+  LocateFixed,
   Maximize2,
   Moon,
+  Package,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
   Play,
   Plus,
+  Save,
   Search,
   Settings2,
   ShieldCheck,
@@ -40,8 +43,18 @@ import { api, desktop } from "./api";
 import { Editor, clearEditorStates, forgetEditorState } from "./Editor";
 import { PdfPreview } from "./PdfPreview";
 import { Modal } from "./Modal";
+import { SetupDialog } from "./Setup";
+import {
+  applySetupEvent,
+  beginSetup,
+  firstLine,
+  idleSetup,
+  setupProgress,
+  type SetupView,
+} from "./setupState";
 import {
   diagnostics,
+  missingFiles,
   outline,
   relativeSource,
   resolveBuild,
@@ -59,6 +72,7 @@ import type {
   Project,
   ProjectConfig,
   Settings,
+  SetupEvent,
   SyncPoint,
   ToolStatus,
 } from "./types";
@@ -76,6 +90,11 @@ const persist = (key: string, value: unknown) =>
   localStorage.setItem(`localtex.${key}`, JSON.stringify(value));
 const filename = (path: string) =>
   path.replaceAll("\\", "/").split("/").at(-1) ?? path;
+const engineNames: Record<Engine, string> = {
+  pdflatex: "pdfLaTeX",
+  xelatex: "XeLaTeX",
+  lualatex: "LuaLaTeX",
+};
 
 export default function App() {
   const [project, setProject] = useState<Project | null>(null),
@@ -106,8 +125,17 @@ export default function App() {
     toolDirectory: null,
   });
   const [modal, setModal] = useState<
-    "settings" | "new" | "file" | "rename" | "commands" | "help" | null
+    | "settings"
+    | "new"
+    | "file"
+    | "rename"
+    | "commands"
+    | "help"
+    | "setup"
+    | null
   >(null);
+  const modalRef = useRef(modal);
+  modalRef.current = modal;
   const [newName, setNewName] = useState("Untitled research");
   const [template, setTemplate] = useState<"article" | "thesis">("article");
   const [fileName, setFileName] = useState("");
@@ -120,12 +148,15 @@ export default function App() {
   const [autoCompile, setAutoCompile] = useState(() =>
     readPreference("autoCompileOnEdit", true),
   );
-  const [commonPackages, setCommonPackages] = useState(() =>
-    readPreference("commonPackages", true),
+  const [autoInstall, setAutoInstall] = useState(() =>
+    readPreference("autoInstallPackages", false),
   );
-  const [preparingPackages, setPreparingPackages] = useState(false);
-  const packageRequests = useRef(new Map<string, Promise<string>>());
-  const preparedDirectories = useRef(new Set<string>());
+  const [setup, setSetupView] = useState<SetupView>(idleSetup);
+  const setupRef = useRef(setup);
+  // Setup streams many lines; apply them in batches instead of one render per line.
+  const setupQueue = useRef<SetupEvent[]>([]);
+  const setupFlush = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const buildAfterSetup = useRef(false);
   const [buildStatus, setBuildStatus] = useState<
     "idle" | "running" | "success" | "failed" | "cancelled"
   >("idle");
@@ -151,7 +182,8 @@ export default function App() {
     draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null),
     autoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const actions = useRef({
-    build: async (_automatic = false) => {},
+    build: async (_automatic = false, _install = false) => {},
+    setup: (_e: SetupEvent) => {},
     external: async () => {},
     event: async (_e: BuildEvent) => {},
     save: async () => {},
@@ -164,6 +196,7 @@ export default function App() {
     (b) => b.text !== b.savedText,
   );
   const issues = useMemo(() => diagnostics(log), [log]);
+  const missing = useMemo(() => missingFiles(log), [log]);
   const sections = useMemo(() => outline(documents), [documents]);
   const results = useMemo(
     () => searchProject(documents, query),
@@ -262,36 +295,56 @@ export default function App() {
       if (id === projectRef.current?.id) void actions.current.build(true);
     }, 1200);
   }
-  async function prepareCommonPackages(
-    directory: string | null,
-    retry = false,
-  ) {
-    const key = directory ?? "PATH";
-    if (retry && !preparingPackages) {
-      packageRequests.current.delete(key);
-      preparedDirectories.current.delete(key);
-    }
-    if (preparedDirectories.current.has(key))
-      return packageRequests.current.get(key)!;
-    let request = packageRequests.current.get(key);
-    if (!request) {
-      request = api.preparePackages(directory);
-      packageRequests.current.set(key, request);
-    }
-    setPreparingPackages(true);
-    setToolMessage(
-      "Preparing common LaTeX packages… First setup may download packages and take several minutes.",
-    );
+  function updateSetup(next: SetupView) {
+    setupRef.current = next;
+    setSetupView(next);
+  }
+  async function runSetup(directory = settings.toolDirectory) {
+    if (!desktop || setupRef.current.status === "running") return;
+    const runId = crypto.randomUUID();
+    updateSetup(beginSetup(setupRef.current, runId));
     try {
-      const message = await request;
-      preparedDirectories.current.add(key);
-      setToolMessage(message);
-      return message;
+      await api.startSetup(runId, directory);
     } catch (e) {
-      setToolMessage(String(e));
-      throw e;
-    } finally {
-      setPreparingPackages(false);
+      updateSetup({
+        ...setupRef.current,
+        status: "failed",
+        failure: { step: "tools", problem: "sample", text: String(e) },
+      });
+    }
+  }
+  function receiveSetup(event: SetupEvent) {
+    // A reloaded window adopts the run that is still going in the background.
+    if (setupRef.current.status === "running" && !setupRef.current.runId)
+      updateSetup({ ...setupRef.current, runId: event.runId });
+    setupQueue.current.push(event);
+    if (event.kind === "finished") flushSetup();
+    else setupFlush.current ??= setTimeout(flushSetup, 120);
+  }
+  function flushSetup() {
+    if (setupFlush.current) clearTimeout(setupFlush.current);
+    setupFlush.current = null;
+    const events = setupQueue.current.splice(0);
+    const next = events.reduce(applySetupEvent, setupRef.current);
+    updateSetup(next);
+    if (!events.some((e) => e.kind === "finished" && e.runId === next.runId))
+      return;
+    if (modalRef.current !== "setup") {
+      if (next.status === "ready")
+        notify("LaTeX is ready. Compiling now starts right away.");
+      else if (next.failure?.problem !== "cancelled")
+        notify("LaTeX setup needs attention. Open it from the top bar.");
+    }
+    if (buildAfterSetup.current) {
+      buildAfterSetup.current = false;
+      void actions.current.build();
+    }
+  }
+  async function stopSetup() {
+    try {
+      await api.cancelSetup();
+    } catch (e) {
+      notify(e);
     }
   }
   async function safeLeave() {
@@ -509,7 +562,7 @@ export default function App() {
       );
     }, 400);
   }
-  async function build(automatic = false) {
+  async function build(automatic = false, install = false) {
     const p = projectRef.current;
     if (!p) return;
     if (!desktop) {
@@ -533,7 +586,15 @@ export default function App() {
         notify("Choose a root document in Project settings before compiling.");
         return;
       }
-      if (commonPackages) await prepareCommonPackages(settings.toolDirectory);
+      if (setupRef.current.status === "running") {
+        // Compiling now would race the package installs; run once setup finishes.
+        buildAfterSetup.current = true;
+        if (!automatic)
+          notify(
+            "LaTeX setup is still running. Your build starts as soon as it finishes.",
+          );
+        return;
+      }
       // Capture before asynchronous saving so edits made during the save mark the PDF stale.
       const serial = editSerial.current;
       await saveAll(false);
@@ -551,7 +612,11 @@ export default function App() {
         options.root,
         options.engine,
         settings.toolDirectory,
-        !automatic || buildStatus === "failed" || buildStatus === "cancelled",
+        !automatic ||
+          install ||
+          buildStatus === "failed" ||
+          buildStatus === "cancelled",
+        install || autoInstall,
       );
     } catch (e) {
       buildId.current = null;
@@ -758,18 +823,19 @@ export default function App() {
       await api.saveSettings(next);
       const result = await api.tools(next.toolDirectory);
       setTools(result);
-      if (
-        commonPackages &&
-        result.find((t) => t.name === "pdflatex")?.available
-      ) {
-        await prepareCommonPackages(next.toolDirectory, true);
-        return;
-      }
+      const ready = ["pdflatex", "latexmk"].every(
+        (name) => result.find((t) => t.name === name)?.available,
+      );
       setToolMessage(
-        result.find((t) => t.name === "latexmk")?.available
+        ready
           ? "Tools checked. Run a test build to confirm compilation."
           : "latexmk is not ready. Finish installation, including its Perl runtime, then check again.",
       );
+      // A different LaTeX folder needs its own package setup.
+      if (ready && !(await api.setupStatus(next.toolDirectory)).complete) {
+        setModal("setup");
+        void runSetup(next.toolDirectory);
+      }
     } catch (e) {
       setToolMessage(String(e));
     } finally {
@@ -780,7 +846,6 @@ export default function App() {
     setChecking(true);
     setToolMessage("Compiling a minimal document…");
     try {
-      if (commonPackages) await prepareCommonPackages(toolDir.trim() || null);
       setToolMessage(
         await api.test(toolDir.trim() || null, buildOptions.engine),
       );
@@ -849,6 +914,7 @@ export default function App() {
   }
   actions.current = {
     build,
+    setup: receiveSetup,
     external: externalChanges,
     event: buildEvent,
     save: saveAll,
@@ -875,22 +941,46 @@ export default function App() {
     }
   }, [autoCompile]);
   useEffect(() => {
-    persist("commonPackages", commonPackages);
-  }, [commonPackages]);
+    persist("autoInstallPackages", autoInstall);
+  }, [autoInstall]);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(""), 9000);
     return () => clearTimeout(timer);
   }, [notice]);
   useEffect(() => {
-    if (desktop)
-      void api
-        .settings()
-        .then((s) => {
-          setSettings(s);
-          setToolDir(s.toolDirectory ?? "");
-        })
-        .catch(notify);
+    if (!desktop) return;
+    // A discarded effect run (React StrictMode) must not start a second setup.
+    let live = true;
+    void api
+      .settings()
+      .then(async (s) => {
+        if (!live) return;
+        setSettings(s);
+        setToolDir(s.toolDirectory ?? "");
+        const status = await api.setupStatus(s.toolDirectory);
+        if (!live) return;
+        const known = {
+          ...setupRef.current,
+          distribution: status.distribution ?? undefined,
+          miktex: status.miktex,
+        };
+        if (status.complete) updateSetup({ ...known, status: "ready" });
+        else if (status.running)
+          updateSetup({ ...known, status: "running", runId: null });
+        else {
+          // First launch: install packages now instead of during the first compile.
+          updateSetup({ ...known, status: "needed" });
+          setModal("setup");
+          void runSetup(s.toolDirectory);
+        }
+      })
+      .catch(notify);
+    return () => {
+      live = false;
+    };
+    // Runs once at launch; runSetup reads current state through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [notify]);
   useEffect(() => {
     if (!desktop) return;
@@ -902,6 +992,7 @@ export default function App() {
       else unlisteners.push(fn);
     };
     void api.onBuild((e) => void actions.current.event(e)).then(keep);
+    void api.onSetup((e) => actions.current.setup(e)).then(keep);
     void api
       .onFiles((e) => {
         if (e.projectId !== projectRef.current?.id) return;
@@ -1015,9 +1106,17 @@ export default function App() {
       },
     },
     {
-      label: "Settings and LaTeX setup",
+      label: "Settings",
       hint: "",
       run: () => setModal("settings"),
+    },
+    {
+      label: "Set up LaTeX",
+      hint: "",
+      run: () => {
+        setModal("setup");
+        void runSetup();
+      },
     },
     {
       label: theme === "light" ? "Use graphite theme" : "Use paper theme",
@@ -1032,49 +1131,161 @@ export default function App() {
         run: () => void openFile(f.path),
       })) ?? []),
   ];
+  const setupPercent = Math.round(setupProgress(setup) * 100);
+  const setupStopped =
+    setup.status === "failed" && setup.failure?.problem === "cancelled";
+  const openUrl = (url: string) => {
+    if (desktop) void openUrlInBrowser(url).catch(notify);
+    else window.open(url, "_blank", "noopener,noreferrer");
+  };
   return (
     <div className="app-shell">
-      <header className="topbar">
-        <button
-          className="brand"
-          aria-label="localTEX home"
-          onClick={() =>
-            void safeLeave().then((ok) => {
-              if (ok) {
-                updateProject(null);
-                setPdf(null);
-              }
-            })
-          }
-        >
-          <span className="brand-mark">
-            l<span>τ</span>
-          </span>
-          <span>
-            local<span className="tex-word">TEX</span>
-          </span>
-          <span className="beta-tag">STUDIO</span>
-        </button>
-        <div className="project-breadcrumb">
-          {project ? (
-            <>
-              <span className="breadcrumb-slash">/</span>
-              <FolderOpen size={14} />
-              <span>{project.name}</span>
-              <ChevronDown size={12} />
-            </>
-          ) : (
-            <span className="topbar-caption">
-              A little space for big ideas.
+      <header className={`topbar ${project ? "has-project" : ""}`}>
+        <div className="topbar-start">
+          {project && (
+            <button
+              className="icon-button"
+              aria-label="Toggle sidebar"
+              title="Toggle sidebar · Ctrl B"
+              onClick={() => setSidebar((v) => !v)}
+            >
+              {sidebar ? (
+                <PanelLeftClose size={18} />
+              ) : (
+                <PanelLeftOpen size={18} />
+              )}
+            </button>
+          )}
+          <button
+            className="brand"
+            aria-label="localTEX home"
+            title="Home"
+            onClick={() =>
+              void safeLeave().then((ok) => {
+                if (ok) {
+                  updateProject(null);
+                  setPdf(null);
+                }
+              })
+            }
+          >
+            <span className="brand-mark">
+              l<span>τ</span>
             </span>
+            {!project && (
+              <span className="brand-name">
+                local<span className="tex-word">TEX</span>
+              </span>
+            )}
+          </button>
+          {project && (
+            <>
+              <span className="topbar-divider" />
+              <span className="project-name" title={project.directory}>
+                <FolderOpen size={17} />
+                <span>{project.name}</span>
+              </span>
+              {!desktop && (
+                <span className="preview-label">Browser preview</span>
+              )}
+            </>
           )}
         </div>
-        <div className="topbar-right">
-          <span className="local-badge">
-            <span /> LOCAL BY NATURE
-          </span>
+        {project && (
+          <div className="mode-switch" role="group" aria-label="Workspace layout">
+            <button
+              className={mode === "write" ? "active" : ""}
+              aria-pressed={mode === "write"}
+              onClick={() => setMode("write")}
+            >
+              <Maximize2 size={15} /> Write
+            </button>
+            <button
+              className={mode === "review" ? "active" : ""}
+              aria-pressed={mode === "review"}
+              onClick={() => setMode("review")}
+            >
+              <BookOpen size={16} /> Review
+            </button>
+          </div>
+        )}
+        <div className="topbar-end">
+          {desktop &&
+            modal !== "setup" &&
+            (setup.status === "running" || setup.status === "failed") && (
+              <button
+                className={`setup-pill ${setupStopped ? "stopped" : setup.status}`}
+                title="Show LaTeX setup"
+                onClick={() => setModal("setup")}
+              >
+                {setup.status === "running" ? (
+                  <span
+                    className="pill-ring"
+                    style={{ "--p": setupPercent / 100 } as React.CSSProperties}
+                  />
+                ) : (
+                  <TriangleAlert size={15} />
+                )}
+                <span className="pill-label">
+                  {setup.status === "running"
+                    ? `Setting up LaTeX ${setupPercent}%`
+                    : setupStopped
+                      ? "Set up LaTeX"
+                      : "Finish LaTeX setup"}
+                </span>
+              </button>
+            )}
+          {project && (
+            <>
+              <button
+                className="auto-toggle"
+                aria-label="Auto compile"
+                aria-pressed={autoCompile}
+                title="Save and compile after a pause in typing"
+                onClick={() => setAutoCompile((value) => !value)}
+              >
+                <span className="switch" aria-hidden="true" />
+                Auto
+              </button>
+              <button
+                className="icon-button"
+                title="Save all · Ctrl S"
+                aria-label="Save all"
+                onClick={() => void saveAll().catch(notify)}
+              >
+                <Save size={18} />
+              </button>
+              {buildStatus === "running" ? (
+                <div className="compile-group">
+                  <button
+                    className="button compile-button"
+                    onClick={() => void build()}
+                  >
+                    <Loader2 size={16} className="spin" /> Compiling
+                  </button>
+                  <button
+                    aria-label="Cancel build"
+                    title="Cancel build"
+                    className="compile-cancel"
+                    onClick={() => void cancelBuild()}
+                  >
+                    <Square size={13} fill="currentColor" />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  className="button compile-button"
+                  onClick={() => void build()}
+                >
+                  <Play size={15} fill="currentColor" /> Compile{" "}
+                  <kbd>Ctrl ↵</kbd>
+                </button>
+              )}
+              <span className="topbar-divider" />
+            </>
+          )}
           <button
-            className="icon-button"
+            className="icon-button hide-compact"
             aria-label="Command palette"
             title="Command palette · Ctrl K"
             onClick={() => {
@@ -1082,21 +1293,23 @@ export default function App() {
               setModal("commands");
             }}
           >
-            <Command size={17} />
+            <Command size={18} />
           </button>
           <button
             className="icon-button"
             aria-label="Toggle theme"
+            title={theme === "light" ? "Use graphite theme" : "Use paper theme"}
             onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
           >
-            {theme === "light" ? <Moon size={17} /> : <Sun size={17} />}
+            {theme === "light" ? <Moon size={18} /> : <Sun size={18} />}
           </button>
           <button
             className="icon-button"
             aria-label="Settings"
+            title="Settings"
             onClick={() => setModal("settings")}
           >
-            <Settings2 size={17} />
+            <Settings2 size={18} />
           </button>
         </div>
       </header>
@@ -1120,20 +1333,20 @@ export default function App() {
               </p>
               <div className="welcome-actions">
                 <button
-                  className="button primary"
+                  className="button primary large"
                   onClick={() => setModal("new")}
                 >
-                  <Plus size={17} /> New project <ArrowRight size={17} />
+                  <Plus size={19} /> New project
                 </button>
                 <button
-                  className="button secondary"
+                  className="button secondary large"
                   onClick={() => void openFolder()}
                 >
-                  <FolderOpen size={17} /> Open folder
+                  <FolderOpen size={19} /> Open folder
                 </button>
               </div>
               <span className="welcome-note">
-                <ShieldCheck size={14} /> On your machine. On your terms.
+                <ShieldCheck size={16} /> On your machine. On your terms.
               </span>
             </div>
             <div className="welcome-art" aria-hidden="true">
@@ -1163,7 +1376,7 @@ export default function App() {
                 <span className="paper-page">1</span>
               </div>
               <div className="art-note note-two">
-                <CheckCircle2 size={14} /> Compiled with care
+                <CheckCircle2 size={15} /> Compiled with care
               </div>
               <span className="art-spark">✳</span>
             </div>
@@ -1174,7 +1387,7 @@ export default function App() {
                 <h2>Pick up where you left off</h2>
                 <span>
                   {settings.recent.length
-                    ? `${settings.recent.length} recent projects`
+                    ? `${settings.recent.length} recent project${settings.recent.length === 1 ? "" : "s"}`
                     : "A fresh page awaits"}
                 </span>
               </div>
@@ -1192,12 +1405,12 @@ export default function App() {
                       <strong>{filename(path)}</strong>
                       <small>{path.replace(/^\\\\\?\\/, "")}</small>
                     </span>
-                    <ArrowRight size={17} />
+                    <ChevronRight size={18} />
                   </button>
                 ))
               ) : (
                 <div className="first-project">
-                  <BookOpen size={24} />
+                  <BookOpen size={26} />
                   <div>
                     <strong>Make room for your next idea.</strong>
                     <p>
@@ -1210,110 +1423,25 @@ export default function App() {
             </section>
             {!desktop && (
               <button className="text-button" onClick={loadDemo}>
-                Explore the browser preview <ArrowRight size={14} />
+                Explore the browser preview <ArrowRight size={15} />
               </button>
             )}
           </div>
           <footer className="welcome-footer">
             <button className="text-button" onClick={() => setModal("help")}>
-              Make yourself at home <ArrowRight size={13} />
+              Keyboard shortcuts
             </button>
             <span>localTEX 0.1</span>
           </footer>
         </main>
       ) : (
         <>
-          <div className="workspace-toolbar">
-            <div className="workspace-title">
-              <button
-                className="icon-button"
-                aria-label="Toggle sidebar"
-                onClick={() => setSidebar((v) => !v)}
-              >
-                {sidebar ? (
-                  <PanelLeftClose size={17} />
-                ) : (
-                  <PanelLeftOpen size={17} />
-                )}
-              </button>
-              <span className="toolbar-divider" />
-              <span className="project-type">
-                {project.files.some((f) => f.path === "introduction.tex")
-                  ? "Thesis"
-                  : "Research project"}
-              </span>
-              {!desktop && (
-                <span className="preview-label">Browser preview</span>
-              )}
-            </div>
-            <div className="mode-switch" aria-label="Workspace layout">
-              <button
-                className={mode === "write" ? "active" : ""}
-                onClick={() => setMode("write")}
-              >
-                <Maximize2 size={13} /> Write
-              </button>
-              <button
-                className={mode === "review" ? "active" : ""}
-                onClick={() => setMode("review")}
-              >
-                <BookOpen size={14} /> Review
-              </button>
-            </div>
-            <div className="compile-actions">
-              <button
-                className="button secondary"
-                aria-label="Auto compile"
-                aria-pressed={autoCompile}
-                title="Save and compile after a pause in typing"
-                onClick={() => setAutoCompile((value) => !value)}
-              >
-                Auto {autoCompile ? "on" : "off"}
-              </button>
-              <button
-                className="icon-button save-button"
-                title="Save all · Ctrl S"
-                aria-label="Save all"
-                onClick={() => void saveAll().catch(notify)}
-              >
-                <ArrowDownToLine size={17} />
-              </button>
-              {preparingPackages ? (
-                <button className="button compile-button" disabled>
-                  <Loader2 size={14} className="spin" /> Preparing packages…
-                </button>
-              ) : buildStatus === "running" ? (
-                <>
-                  <button
-                    className="button compile-button"
-                    onClick={() => void build()}
-                  >
-                    <Loader2 size={14} className="spin" /> Compiling
-                  </button>
-                  <button
-                    aria-label="Cancel build"
-                    className="icon-button"
-                    onClick={() => void cancelBuild()}
-                  >
-                    <Square size={15} />
-                  </button>
-                </>
-              ) : (
-                <button
-                  className="button compile-button"
-                  onClick={() => void build()}
-                >
-                  <Play size={14} fill="currentColor" /> Compile <kbd>⌃ ↵</kbd>
-                </button>
-              )}
-            </div>
-          </div>
           {recovery.length > 0 && (
             <div className="recovery-banner">
-              <Sparkles size={16} />
+              <Sparkles size={17} />
               <span>
-                We kept your place. {recovery.length} file(s) have recoverable
-                edits.
+                We kept your place. {recovery.length} file
+                {recovery.length === 1 ? " has" : "s have"} recoverable edits.
               </span>
               <button onClick={() => void restoreDrafts()}>
                 Restore edits
@@ -1338,105 +1466,96 @@ export default function App() {
             {sidebar && (
               <aside className="sidebar">
                 <div className="sidebar-tabs">
-                  <button
-                    aria-label="Project files"
-                    className={sideTab === "files" ? "active" : ""}
-                    onClick={() => setSideTab("files")}
-                  >
-                    <Files size={16} />
-                  </button>
-                  <button
-                    aria-label="Document outline"
-                    className={sideTab === "outline" ? "active" : ""}
-                    onClick={() => setSideTab("outline")}
-                  >
-                    <ListTree size={17} />
-                  </button>
-                  <button
-                    aria-label="Search project"
-                    className={sideTab === "search" ? "active" : ""}
-                    onClick={() => setSideTab("search")}
-                  >
-                    <Search size={16} />
-                  </button>
-                </div>
-                <div className="sidebar-heading">
-                  <span>
-                    {sideTab === "files"
-                      ? "PROJECT"
-                      : sideTab === "outline"
-                        ? "DOCUMENT OUTLINE"
-                        : "FIND IN PROJECT"}
-                  </span>
-                  {sideTab === "files" && (
+                  {(
+                    [
+                      ["files", "Project files", "Files", Files],
+                      ["outline", "Document outline", "Outline", ListTree],
+                      ["search", "Search project", "Search", Search],
+                    ] as const
+                  ).map(([id, label, text, Icon]) => (
                     <button
-                      className="icon-button"
-                      aria-label="New file"
-                      onClick={() => {
-                        setFileName("untitled.tex");
-                        setModal("file");
-                      }}
+                      key={id}
+                      aria-label={label}
+                      aria-pressed={sideTab === id}
+                      className={sideTab === id ? "active" : ""}
+                      onClick={() => setSideTab(id)}
                     >
-                      <FilePlus2 size={14} />
+                      <Icon size={16} />
+                      <span>{text}</span>
                     </button>
-                  )}
+                  ))}
                 </div>
                 <div className="sidebar-content">
                   {sideTab === "files" ? (
                     <>
-                      <div className="tree-root">
-                        <ChevronDown size={13} />
-                        <FolderOpen size={14} />
-                        <span>{project.name}</span>
-                      </div>
-                      {project.files.map((f) => (
+                      <div className="sidebar-heading">
+                        <span title={project.directory}>{project.name}</span>
                         <button
-                          key={f.path}
-                          className={`file-row ${active === f.path ? "active" : ""}`}
-                          disabled={!f.editable}
-                          title={f.path}
-                          onClick={() => void openFile(f.path)}
-                        >
-                          <span
-                            className={`file-glyph ${f.path.endsWith(".bib") ? "bib" : ""}`}
-                          >
-                            {f.path.endsWith(".tex")
-                              ? "T"
-                              : f.path.endsWith(".bib")
-                                ? "B"
-                                : "·"}
-                          </span>
-                          <span>{f.path}</span>
-                          {buffers.current.get(f.path)?.text !==
-                            buffers.current.get(f.path)?.savedText && (
-                            <span className="dirty-dot" />
-                          )}
-                        </button>
-                      ))}
-                      {active && (
-                        <button
-                          className="text-button rename-link"
+                          className="icon-button"
+                          aria-label="New file"
+                          title="New file"
                           onClick={() => {
-                            setFileName(active);
-                            setModal("rename");
+                            setFileName("untitled.tex");
+                            setModal("file");
                           }}
                         >
-                          Rename selected file
+                          <FilePlus2 size={17} />
                         </button>
-                      )}
+                      </div>
+                      {project.files.map((f) => (
+                        <div
+                          key={f.path}
+                          className={`file-row ${active === f.path ? "active" : ""}`}
+                        >
+                          <button
+                            className="file-open"
+                            disabled={!f.editable}
+                            title={f.path}
+                            onClick={() => void openFile(f.path)}
+                          >
+                            <span
+                              className={`file-glyph ${f.path.endsWith(".bib") ? "bib" : ""}`}
+                            >
+                              {f.path.endsWith(".tex")
+                                ? "T"
+                                : f.path.endsWith(".bib")
+                                  ? "B"
+                                  : "·"}
+                            </span>
+                            <span className="file-name">{f.path}</span>
+                            {buffers.current.get(f.path)?.text !==
+                              buffers.current.get(f.path)?.savedText && (
+                              <span className="dirty-dot" />
+                            )}
+                          </button>
+                          {active === f.path && (
+                            <button
+                              className="icon-button file-action"
+                              aria-label={`Rename ${f.path}`}
+                              title="Rename file"
+                              onClick={() => {
+                                setFileName(active);
+                                setModal("rename");
+                              }}
+                            >
+                              <Pencil size={14} />
+                            </button>
+                          )}
+                        </div>
+                      ))}
                     </>
                   ) : sideTab === "outline" ? (
                     sections.length ? (
                       sections.map((s, i) => (
                         <button
                           key={`${s.path}-${i}`}
-                          className="outline-row"
+                          className={`outline-row level-${Math.max(0, s.level)}`}
                           style={{
-                            paddingLeft: 12 + Math.max(0, s.level - 1) * 12,
+                            paddingLeft: 12 + Math.max(0, s.level - 1) * 14,
                           }}
                           onClick={() => void openFile(s.path, s.line)}
                         >
-                          <Hash size={12} />
+                          <Hash size={13} />
                           <span>{s.title}</span>
                         </button>
                       ))
@@ -1449,7 +1568,7 @@ export default function App() {
                   ) : (
                     <>
                       <label className="search-field">
-                        <Search size={14} />
+                        <Search size={16} />
                         <input
                           aria-label="Search project text"
                           placeholder="Find a thought…"
@@ -1460,7 +1579,8 @@ export default function App() {
                       {query && (
                         <p className="search-count">
                           {results.length}
-                          {results.length === 200 ? "+" : ""} matches
+                          {results.length === 200 ? "+" : ""}{" "}
+                          {results.length === 1 ? "match" : "matches"}
                         </p>
                       )}
                       {results.map((r, i) => (
@@ -1470,20 +1590,13 @@ export default function App() {
                           onClick={() => void openFile(r.path, r.line)}
                         >
                           <strong>
-                            {filename(r.path)} <span>:{r.line}</span>
+                            {filename(r.path)} <span>line {r.line}</span>
                           </strong>
                           <small>{r.text}</small>
                         </button>
                       ))}
                     </>
                   )}
-                </div>
-                <div className="sidebar-bottom">
-                  <div>
-                    <ShieldCheck size={14} />
-                    <span>Everything stays here.</span>
-                  </div>
-                  <span>Files live in your project folder.</span>
                 </div>
               </aside>
             )}
@@ -1494,59 +1607,60 @@ export default function App() {
               >
                 <section className="editor-pane" aria-label="Source workspace">
                   <div className="editor-tabs">
-                    {tabs.map((path) => (
-                      <div
-                        className={`editor-tab ${path === active ? "active" : ""}`}
-                        key={path}
-                      >
-                        <button onClick={() => selectActive(path)}>
-                          <span className="file-glyph">
-                            {path.endsWith(".bib") ? "B" : "T"}
-                          </span>
-                          {filename(path)}
-                          {buffers.current.get(path)?.text !==
-                            buffers.current.get(path)?.savedText && (
-                            <span className="dirty-dot" />
-                          )}
-                        </button>
-                        <button
-                          aria-label={`Close ${filename(path)}`}
-                          className="tab-close"
-                          onClick={() => void closeTab(path)}
+                    <div className="tab-strip">
+                      {tabs.map((path) => (
+                        <div
+                          className={`editor-tab ${path === active ? "active" : ""}`}
+                          key={path}
+                          title={path}
                         >
-                          <X size={12} />
-                        </button>
-                      </div>
-                    ))}
-                    <button
-                      className="icon-button tab-plus"
-                      aria-label="Create file"
-                      onClick={() => {
-                        setFileName("untitled.tex");
-                        setModal("file");
-                      }}
-                    >
-                      <Plus size={15} />
-                    </button>
-                  </div>
-                  <div className="source-breadcrumb">
-                    <span>{active || "No file selected"}</span>
-                    <span className="source-breadcrumb-right">
-                      {buffer?.path.endsWith(".bib") ? "BIBLIOGRAPHY" : "LATEX"}
+                          <button onClick={() => selectActive(path)}>
+                            <span
+                              className={`file-glyph ${path.endsWith(".bib") ? "bib" : ""}`}
+                            >
+                              {path.endsWith(".bib") ? "B" : "T"}
+                            </span>
+                            {filename(path)}
+                            {buffers.current.get(path)?.text !==
+                              buffers.current.get(path)?.savedText && (
+                              <span className="dirty-dot" />
+                            )}
+                          </button>
+                          <button
+                            aria-label={`Close ${filename(path)}`}
+                            className="tab-close"
+                            onClick={() => void closeTab(path)}
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                      ))}
                       <button
-                        className="icon-button"
-                        aria-label="Jump to PDF"
-                        title="Jump to PDF · Ctrl Shift L"
-                        disabled={!pdf}
-                        onClick={() => void syncForward()}
+                        className="icon-button tab-plus"
+                        aria-label="Create file"
+                        title="New file"
+                        onClick={() => {
+                          setFileName("untitled.tex");
+                          setModal("file");
+                        }}
                       >
-                        <ArrowRight size={14} />
+                        <Plus size={17} />
                       </button>
-                    </span>
+                    </div>
+                    <button
+                      className="pane-action"
+                      aria-label="Jump to PDF"
+                      title="Jump to PDF · Ctrl Shift L"
+                      disabled={!pdf}
+                      onClick={() => void syncForward()}
+                    >
+                      <LocateFixed size={16} />
+                      <span>Jump to PDF</span>
+                    </button>
                   </div>
                   {buffer?.conflict && (
                     <div className="conflict-banner">
-                      <TriangleAlert size={15} />
+                      <TriangleAlert size={16} />
                       <span>This file changed outside localTEX.</span>
                       <button onClick={() => void resolveConflict(false)}>
                         Use disk version
@@ -1558,7 +1672,7 @@ export default function App() {
                   )}
                   {buffer?.missing && (
                     <div className="conflict-banner">
-                      <TriangleAlert size={15} />
+                      <TriangleAlert size={16} />
                       <span>
                         This file was moved or deleted. Copy your edits before
                         closing the tab.
@@ -1584,7 +1698,7 @@ export default function App() {
                     />
                   ) : (
                     <div className="empty-state">
-                      <FileText />
+                      <FileText size={28} />
                       <h3>A clear space to think.</h3>
                       <p>Choose a file from your project to begin.</p>
                     </div>
@@ -1638,7 +1752,7 @@ export default function App() {
                 />
               </div>
               {showOutput && (
-                <section className="output-panel">
+                <section className="output-panel" aria-label="Build output">
                   <div className="output-header">
                     <button
                       className={outputTab === "issues" ? "active" : ""}
@@ -1658,9 +1772,28 @@ export default function App() {
                       aria-label="Close compiler output"
                       onClick={() => setShowOutput(false)}
                     >
-                      <X size={14} />
+                      <X size={16} />
                     </button>
                   </div>
+                  {buildStatus === "failed" && missing.length > 0 && (
+                    <div className="missing-banner">
+                      <Package size={18} />
+                      <span>
+                        <strong>{missing.join(", ")}</strong>{" "}
+                        {missing.length === 1 ? "isn’t" : "aren’t"} installed.
+                        {setup.miktex === false &&
+                          " Install the package with TeX Live Manager, then compile again."}
+                      </span>
+                      {setup.miktex !== false && (
+                        <button
+                          className="button primary small"
+                          onClick={() => void build(false, true)}
+                        >
+                          Install and compile
+                        </button>
+                      )}
+                    </div>
+                  )}
                   {outputTab === "log" ? (
                     <pre className="compiler-log">
                       {log ||
@@ -1680,7 +1813,7 @@ export default function App() {
                               if (path) void openFile(path, issue.line ?? 1);
                             }}
                           >
-                            <TriangleAlert size={14} />
+                            <TriangleAlert size={16} />
                             <span>{issue.message}</span>
                             <small>
                               {issue.path ? filename(issue.path) : ""}
@@ -1690,10 +1823,10 @@ export default function App() {
                         ))
                       ) : (
                         <div className="no-issues">
-                          <CheckCircle2 size={16} />{" "}
+                          <CheckCircle2 size={18} />{" "}
                           {buildStatus === "failed"
                             ? "No structured diagnostics found. See compiler output for details."
-                            : "A little clarity. No reported problems."}
+                            : "No problems reported."}
                         </div>
                       )}
                     </div>
@@ -1706,30 +1839,31 @@ export default function App() {
             <button
               className={`build-status ${buildStatus}`}
               onClick={() => setShowOutput((s) => !s)}
+              title="Show build output"
             >
               {buildStatus === "running" ? (
-                <Loader2 className="spin" size={12} />
+                <Loader2 className="spin" size={14} />
               ) : buildStatus === "success" ? (
-                <CheckCircle2 size={12} />
+                <CheckCircle2 size={14} />
               ) : buildStatus === "failed" ? (
-                <TriangleAlert size={12} />
+                <TriangleAlert size={14} />
               ) : (
-                <Terminal size={12} />
+                <Terminal size={14} />
               )}
               <span>
                 {buildStatus === "running"
-                  ? "Compiling locally…"
+                  ? "Compiling on your machine…"
                   : buildStatus === "success"
                     ? pdfStale
                       ? "Changes since last build"
-                      : "Build complete"
+                      : "PDF is up to date"
                     : buildStatus === "failed"
-                      ? "Build needs attention"
+                      ? "Build failed. See problems"
                       : buildStatus === "cancelled"
                         ? "Build cancelled"
-                        : "Ready when you are"}
+                        : "Not compiled yet"}
               </span>
-              <ChevronRight size={11} />
+              <ChevronRight size={13} />
             </button>
             <span className="status-saved">
               {dirty ? "Unsaved changes" : savedAt}
@@ -1739,8 +1873,8 @@ export default function App() {
               Ln {cursor.line}, Col {cursor.column}
             </span>
             <span>UTF-8</span>
-            <button onClick={() => setModal("settings")}>
-              {buildOptions.engine} <ChevronDown size={10} />
+            <button onClick={() => setModal("settings")} title="LaTeX engine">
+              {engineNames[buildOptions.engine]} <ChevronDown size={13} />
             </button>
             <span className="status-local">
               <span /> Local
@@ -1750,24 +1884,34 @@ export default function App() {
       )}
       {busy && (
         <div className="busy-indicator" role="status">
-          <Loader2 size={15} className="spin" /> Opening your workspace…
+          <Loader2 size={17} className="spin" /> Opening your workspace…
         </div>
       )}
       {notice && (
         <div className="toast" role="status">
-          <CircleHelp size={18} />
+          <CircleHelp size={19} />
           <span>{notice}</span>
           <button
             className="icon-button"
             aria-label="Dismiss notification"
             onClick={() => setNotice("")}
           >
-            <X size={15} />
+            <X size={16} />
           </button>
         </div>
       )}
+      {modal === "setup" && (
+        <SetupDialog
+          view={setup}
+          onClose={() => setModal(null)}
+          onStart={() => void runSetup()}
+          onStop={() => void stopSetup()}
+          onOpenUrl={openUrl}
+          onChooseFolder={() => setModal("settings")}
+        />
+      )}
       {modal === "new" && (
-        <Modal title="Make room for an idea" onClose={() => setModal(null)}>
+        <Modal title="New project" onClose={() => setModal(null)}>
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -1793,29 +1937,29 @@ export default function App() {
                 className={template === "article" ? "selected" : ""}
                 onClick={() => setTemplate("article")}
               >
-                <FileText size={24} />
+                <FileText size={26} />
                 <strong>Research article</strong>
                 <span>A clear, considered beginning.</span>
-                {template === "article" && <Check size={15} />}
+                {template === "article" && <Check size={17} />}
               </button>
               <button
                 type="button"
                 className={template === "thesis" ? "selected" : ""}
                 onClick={() => setTemplate("thesis")}
               >
-                <BookOpen size={24} />
+                <BookOpen size={26} />
                 <strong>Thesis</strong>
                 <span>A home for the bigger picture.</span>
-                {template === "thesis" && <Check size={15} />}
+                {template === "thesis" && <Check size={17} />}
               </button>
             </div>
             <div className="modal-footer">
               <span>
-                <ShieldCheck size={13} /> Saved as ordinary local files
+                <ShieldCheck size={15} /> Saved as ordinary local files
               </span>
               <button className="button primary" disabled={busy} type="submit">
                 {desktop ? "Choose location" : "Explore sample"}
-                <ArrowRight size={15} />
+                <ArrowRight size={17} />
               </button>
             </div>
           </form>
@@ -1823,7 +1967,7 @@ export default function App() {
       )}
       {(modal === "file" || modal === "rename") && (
         <Modal
-          title={modal === "rename" ? "Rename file" : "A fresh page"}
+          title={modal === "rename" ? "Rename file" : "New file"}
           onClose={() => setModal(null)}
         >
           <form
@@ -1833,8 +1977,8 @@ export default function App() {
             }}
           >
             <p className="modal-intro">
-              Use a path inside an existing project folder. Renaming does not
-              rewrite LaTeX references.
+              Use a path inside this project folder. Renaming doesn’t update
+              \input or \include references.
             </p>
             <label className="field-label">
               File name
@@ -1849,18 +1993,13 @@ export default function App() {
               <span />
               <button className="button primary" type="submit">
                 {modal === "rename" ? "Rename" : "Create file"}
-                <ArrowRight size={15} />
               </button>
             </div>
           </form>
         </Modal>
       )}
       {modal === "settings" && (
-        <Modal
-          title="Make yourself at home"
-          wide
-          onClose={() => setModal(null)}
-        >
+        <Modal title="Settings" wide onClose={() => setModal(null)}>
           <div className="settings-body">
             <section>
               <h3>Workspace</h3>
@@ -1874,13 +2013,13 @@ export default function App() {
                     className={theme === "light" ? "active" : ""}
                     onClick={() => setTheme("light")}
                   >
-                    <Sun size={14} /> Paper
+                    <Sun size={16} /> Paper
                   </button>
                   <button
                     className={theme === "dark" ? "active" : ""}
                     onClick={() => setTheme("dark")}
                   >
-                    <Moon size={14} /> Graphite
+                    <Moon size={16} /> Graphite
                   </button>
                 </div>
               </div>
@@ -1962,33 +2101,68 @@ export default function App() {
               </section>
             )}
             <section>
-              <h3>
-                LaTeX setup{" "}
-                <span className="section-tag">LOCAL COMPILATION</span>
-              </h3>
-              <p className="setting-description">
-                Use MiKTeX or TeX Live, with latexmk and SyncTeX. MiKTeX also
-                needs Perl for latexmk. Install missing packages through your
-                distribution’s tools.
-              </p>
+              <h3>LaTeX</h3>
+              <div className={`setup-summary ${setup.status}`}>
+                <span className="setup-dot" aria-hidden="true" />
+                <div>
+                  <strong>
+                    {!desktop
+                      ? "Available in the desktop app"
+                      : setup.status === "ready"
+                        ? `${setup.distribution ?? "LaTeX"} is set up`
+                        : setup.status === "running"
+                          ? "Setup is running"
+                          : setup.status === "failed" && !setupStopped
+                            ? "Setup needs attention"
+                            : "Not set up yet"}
+                  </strong>
+                  <p>
+                    {!desktop
+                      ? "The browser preview doesn’t compile LaTeX."
+                      : setup.status === "ready"
+                        ? "Common packages are installed. Run setup again after changing your LaTeX installation."
+                        : setup.status === "running"
+                          ? `${setupPercent}% done. You can keep working while it finishes.`
+                          : setup.status === "failed" && setup.failure && !setupStopped
+                            ? firstLine(setup.failure.text)
+                            : "Installs the packages most papers use, so compiling starts right away."}
+                  </p>
+                </div>
+                <button
+                  className="button secondary"
+                  disabled={!desktop}
+                  onClick={() => {
+                    setModal("setup");
+                    if (setup.status !== "running") void runSetup();
+                  }}
+                >
+                  {setup.status === "running"
+                    ? "Show progress"
+                    : setup.status === "ready"
+                      ? "Run setup again"
+                      : "Set up LaTeX"}
+                </button>
+              </div>
               <label className="setting-row">
                 <div>
-                  <strong>Prepare common packages automatically</strong>
+                  <strong>Install missing packages automatically</strong>
                   <p>
-                    MiKTeX: maths, figures, tables, citations, diagrams and
-                    fonts. Downloads missing packages before your first compile.
+                    When a document needs a package that isn’t installed,
+                    MiKTeX downloads it during the build. When this is off,
+                    localTEX asks first.
                   </p>
                 </div>
                 <input
                   type="checkbox"
-                  checked={commonPackages}
-                  disabled={preparingPackages}
-                  onChange={(e) => setCommonPackages(e.target.checked)}
+                  checked={autoInstall}
+                  onChange={(e) => setAutoInstall(e.target.checked)}
                 />
               </label>
               <label className="field-label">
-                Executable folder{" "}
-                <span className="optional">optional · otherwise uses PATH</span>
+                LaTeX folder{" "}
+                <span className="optional">
+                  Optional. Leave empty to use the folders on your PATH.
+                </span>
                 <div className="input-with-button">
                   <input
                     value={toolDir}
@@ -1997,7 +2171,7 @@ export default function App() {
                   />
                   <button
                     className="icon-button"
-                    aria-label="Choose executable folder"
+                    aria-label="Choose LaTeX folder"
                     disabled={!desktop}
                     onClick={() =>
                       void open({ directory: true, multiple: false }).then(
@@ -2007,51 +2181,29 @@ export default function App() {
                       )
                     }
                   >
-                    <FolderOpen size={16} />
+                    <FolderOpen size={17} />
                   </button>
                 </div>
               </label>
               <div className="setup-actions">
                 <button
                   className="button secondary"
-                  disabled={!desktop || checking || preparingPackages}
+                  disabled={!desktop || checking}
                   onClick={() => void checkTools()}
                 >
                   {checking ? (
-                    <Loader2 size={14} className="spin" />
+                    <Loader2 size={16} className="spin" />
                   ) : (
-                    <CheckCircle2 size={14} />
-                  )}{" "}
-                  Save & check tools
+                    <CheckCircle2 size={16} />
+                  )}
+                  Save and check tools
                 </button>
                 <button
                   className="button secondary"
-                  disabled={!desktop || checking || preparingPackages}
+                  disabled={!desktop || checking}
                   onClick={() => void testBuild()}
                 >
-                  <Play size={13} /> Test compilation
-                </button>
-                <button
-                  className="button secondary"
-                  disabled={
-                    !desktop ||
-                    checking ||
-                    preparingPackages ||
-                    buildStatus === "running"
-                  }
-                  onClick={() =>
-                    void prepareCommonPackages(
-                      toolDir.trim() || null,
-                      true,
-                    ).catch(notify)
-                  }
-                >
-                  {preparingPackages ? (
-                    <Loader2 size={14} className="spin" />
-                  ) : (
-                    <ArrowDownToLine size={14} />
-                  )}
-                  Install / repair common packages
+                  <Play size={15} /> Test compilation
                 </button>
               </div>
               {toolMessage && (
@@ -2062,12 +2214,12 @@ export default function App() {
               {tools.length > 0 && (
                 <div className="tool-list">
                   {tools.map((t) => (
-                    <details key={t.name}>
+                    <details key={t.name} className={t.available ? "ready" : "missing"}>
                       <summary>
                         {t.available ? (
-                          <CheckCircle2 size={14} />
+                          <CheckCircle2 size={16} />
                         ) : (
-                          <TriangleAlert size={14} />
+                          <TriangleAlert size={16} />
                         )}
                         <strong>{t.name}</strong>
                         <span>{t.available ? "Ready" : "Needs attention"}</span>
@@ -2086,25 +2238,21 @@ export default function App() {
                   <button
                     className="text-button"
                     key={label}
-                    onClick={() => {
-                      if (desktop) void openUrl(url).catch(notify);
-                      else window.open(url, "_blank", "noopener,noreferrer");
-                    }}
+                    onClick={() => openUrl(url)}
                   >
                     {label}
-                    <ArrowRight size={12} />
                   </button>
                 ))}
               </div>
             </section>
             <div className="privacy-note">
-              <ShieldCheck size={19} />
+              <ShieldCheck size={20} />
               <div>
                 <strong>Your work stays yours.</strong>
                 <p>
                   No accounts, analytics, or cloud compilation. Fonts and PDF
-                  rendering are bundled. Setup links open only when you choose
-                  them.
+                  rendering are bundled. localTEX goes online only to install
+                  LaTeX packages, and only when you set up LaTeX or ask it to.
                 </p>
               </div>
             </div>
@@ -2117,7 +2265,7 @@ export default function App() {
           onClose={() => setModal(null)}
         >
           <label className="command-search">
-            <Search size={19} />
+            <Search size={20} />
             <input
               autoFocus
               value={commandQuery}
@@ -2150,14 +2298,14 @@ export default function App() {
                   }}
                 >
                   <span>{c.label}</span>
-                  <kbd>{c.hint}</kbd>
+                  {c.hint && <kbd>{c.hint}</kbd>}
                 </button>
               ))}
           </div>
         </Modal>
       )}
       {modal === "help" && (
-        <Modal title="A few small shortcuts" onClose={() => setModal(null)}>
+        <Modal title="Keyboard shortcuts" onClose={() => setModal(null)}>
           <p className="modal-intro">
             Keep your hands on the keyboard and your mind on the idea.
           </p>
@@ -2180,7 +2328,7 @@ export default function App() {
             ))}
           </div>
           <p className="help-footnote">
-            localTEX 0.1 · Built for a slower breath and a sharper thought.
+            localTEX 0.1. Built for a slower breath and a sharper thought.
           </p>
         </Modal>
       )}

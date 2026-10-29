@@ -1,10 +1,11 @@
 mod compiler;
-use localtex_core::{paths, process_job, templates, workspace};
+use localtex_core::{paths, process_job, setup, templates, workspace};
 
-use compiler::{ActiveBuild, ToolStatus};
+use compiler::{ActiveBuild, Installer, ToolStatus};
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     path::PathBuf,
     process::Stdio,
@@ -24,7 +25,50 @@ struct AppState {
     build: Mutex<Option<ActiveBuild>>,
     last_pdf: Mutex<Option<(String, PathBuf)>>,
     io: Mutex<()>,
-    package_setup: Arc<Mutex<()>>,
+    /// Stop flag of the running LaTeX setup, if any.
+    setup: Mutex<Option<Arc<AtomicBool>>>,
+    /// Whether (tool folder, engine) belongs to MiKTeX, learned once per session.
+    miktex: Mutex<HashMap<(String, String), bool>>,
+}
+/// Written when setup succeeds, so later launches skip it.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupRecord {
+    version: u32,
+    tool_directory: Option<String>,
+    distribution: String,
+    miktex: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupStatus {
+    complete: bool,
+    running: bool,
+    distribution: Option<String>,
+    miktex: Option<bool>,
+}
+fn tool_folder(directory: &Option<String>) -> Option<String> {
+    directory
+        .as_ref()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+}
+fn detect_miktex(app: &tauri::AppHandle, directory: &Option<String>, engine: &str) -> Result<bool> {
+    let key = (
+        tool_folder(directory).unwrap_or_default(),
+        engine.to_string(),
+    );
+    let state = app.state::<AppState>();
+    if let Some(&known) = state.miktex.lock().map_err(|e| e.to_string())?.get(&key) {
+        return Ok(known);
+    }
+    let miktex = compiler::is_miktex(directory, engine)?;
+    state
+        .miktex
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(key, miktex);
+    Ok(miktex)
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +127,40 @@ fn internal(root: &std::path::Path) -> Result<PathBuf> {
         workspace::atomic_write(&path.join(".gitignore"), b"build/\n")?;
     }
     Ok(path)
+}
+/// The folder TeX tools run in. latexmk runs on Perl, which only handles paths in the
+/// ANSI code page, so a project path with other characters (Bangla, for example) is
+/// reached through its 8.3 short name or, on drives without short names, an ASCII
+/// junction in app data. Both lead to the same files.
+fn tex_root(app: &tauri::AppHandle, project_id: &str, root: &std::path::Path) -> Result<PathBuf> {
+    let real = paths::tool_path(root);
+    if real.is_ascii() {
+        return Ok(PathBuf::from(real));
+    }
+    if let Some(short) = paths::short_path(&real).filter(|s| s.is_ascii()) {
+        return Ok(PathBuf::from(short));
+    }
+    let links = app_data(app)?.join("links");
+    fs::create_dir_all(&links).map_err(|e| e.to_string())?;
+    let links = paths::tool_path(&links);
+    let links = if links.is_ascii() {
+        links
+    } else {
+        paths::short_path(&links)
+            .filter(|s| s.is_ascii())
+            .ok_or("LaTeX tools can't read this project's folder name on this drive. Move the project to a folder with an English name.")?
+    };
+    let link = PathBuf::from(links).join(&project_id[..project_id.len().min(16)]);
+    if link.canonicalize().ok() == Some(root.canonicalize().map_err(|e| e.to_string())?) {
+        return Ok(link);
+    }
+    // A link left over from an earlier location is replaced; removing it keeps its target.
+    if fs::symlink_metadata(&link).is_ok() {
+        fs::remove_dir(&link).map_err(|e| e.to_string())?;
+    }
+    paths::junction(&link, root)
+        .map_err(|e| format!("Could not prepare a path LaTeX tools can read: {e}"))?;
+    Ok(link)
 }
 #[tauri::command]
 fn load_settings(app: tauri::AppHandle) -> Result<Settings> {
@@ -313,15 +391,101 @@ async fn index_project(state: State<'_, AppState>, project_id: String) -> Result
         } Ok(docs)
     }).await.map_err(|e|e.to_string())?
 }
+fn read_setup_record(app: &tauri::AppHandle) -> Option<SetupRecord> {
+    let bytes = fs::read(app_data(app).ok()?.join("setup.json")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
 #[tauri::command]
-async fn prepare_packages(state: State<'_, AppState>, directory: Option<String>) -> Result<String> {
-    let lock = state.package_setup.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = lock.lock().map_err(|e| e.to_string())?;
-        localtex_core::packages::prepare(directory)
+fn setup_status(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    directory: Option<String>,
+) -> Result<SetupStatus> {
+    let running = state.setup.lock().map_err(|e| e.to_string())?.is_some();
+    let record = read_setup_record(&app);
+    let complete = record.as_ref().is_some_and(|r| {
+        r.version == setup::SETUP_VERSION
+            && tool_folder(&r.tool_directory) == tool_folder(&directory)
+    });
+    Ok(SetupStatus {
+        complete,
+        running,
+        distribution: record.as_ref().map(|r| r.distribution.clone()),
+        miktex: record.map(|r| r.miktex),
     })
-    .await
-    .map_err(|e| e.to_string())?
+}
+fn emit_setup(app: &tauri::AppHandle, run_id: &str, payload: impl Serialize) {
+    if let Ok(serde_json::Value::Object(mut message)) = serde_json::to_value(payload) {
+        message.insert("runId".into(), run_id.into());
+        let _ = app.emit("setup-event", message);
+    }
+}
+#[tauri::command]
+fn start_setup(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    run_id: String,
+    directory: Option<String>,
+) -> Result<()> {
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut running = state.setup.lock().map_err(|e| e.to_string())?;
+        if running.is_some() {
+            return Err("LaTeX setup is already running.".into());
+        }
+        *running = Some(stop.clone());
+    }
+    std::thread::spawn(move || {
+        let directory = tool_folder(&directory);
+        let result = setup::run(&directory, &stop, &mut |event| {
+            emit_setup(&app, &run_id, event)
+        });
+        let state = app.state::<AppState>();
+        if let Ok(outcome) = &result {
+            let record = SetupRecord {
+                version: setup::SETUP_VERSION,
+                tool_directory: directory.clone(),
+                distribution: outcome.distribution.clone(),
+                miktex: outcome.miktex,
+            };
+            let saved = app_data(&app).and_then(|path| {
+                workspace::atomic_write(
+                    &path.join("setup.json"),
+                    &serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?,
+                )
+            });
+            if let Err(error) = saved {
+                emit_setup(
+                    &app,
+                    &run_id,
+                    serde_json::json!({"kind":"line","text":format!("Could not remember this setup: {error}")}),
+                );
+            }
+        }
+        if let Ok(mut running) = state.setup.lock() {
+            *running = None;
+        }
+        emit_setup(
+            &app,
+            &run_id,
+            match result {
+                Ok(outcome) => {
+                    serde_json::json!({"kind":"finished","success":true,"outcome":outcome})
+                }
+                Err(failure) => {
+                    serde_json::json!({"kind":"finished","success":false,"failure":failure})
+                }
+            },
+        );
+    });
+    Ok(())
+}
+#[tauri::command]
+fn cancel_setup(state: State<'_, AppState>) -> Result<()> {
+    if let Some(stop) = state.setup.lock().map_err(|e| e.to_string())?.as_ref() {
+        stop.store(true, Ordering::SeqCst);
+    }
+    Ok(())
 }
 #[tauri::command]
 async fn check_toolchain(directory: Option<String>) -> Result<Vec<ToolStatus>> {
@@ -330,7 +494,11 @@ async fn check_toolchain(directory: Option<String>) -> Result<Vec<ToolStatus>> {
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
-async fn test_compilation(directory: Option<String>, engine: String) -> Result<String> {
+async fn test_compilation(
+    app: tauri::AppHandle,
+    directory: Option<String>,
+    engine: String,
+) -> Result<String> {
     if !["pdflatex", "xelatex", "lualatex"].contains(&engine.as_str()) {
         return Err("Unsupported engine.".into());
     }
@@ -341,8 +509,16 @@ async fn test_compilation(directory: Option<String>, engine: String) -> Result<S
             "\\documentclass{article}\n\\begin{document}localTEX is ready.\\end{document}",
         )
         .map_err(|e| e.to_string())?;
-        let cmd =
-            compiler::configure_latexmk(&directory, &engine, temp.path(), "test.tex", None, false)?;
+        let installer = Installer::new(detect_miktex(&app, &directory, &engine)?, false);
+        let cmd = compiler::configure_latexmk(
+            &directory,
+            &engine,
+            temp.path(),
+            "test.tex",
+            None,
+            false,
+            installer,
+        )?;
         let (success, output) = compiler::output_timeout(cmd, Duration::from_secs(45))?;
         if success && temp.path().join("test.pdf").exists() {
             Ok("Compilation passed. Your local toolchain is ready.".into())
@@ -362,15 +538,17 @@ async fn start_build(
     engine: String,
     directory: Option<String>,
     force: bool,
+    install: bool,
 ) -> Result<()> {
     tauri::async_runtime::spawn_blocking(move || {
         launch_build(
-            app, project_id, build_id, document, engine, directory, force,
+            app, project_id, build_id, document, engine, directory, force, install,
         )
     })
     .await
     .map_err(|e| e.to_string())?
 }
+#[allow(clippy::too_many_arguments)]
 fn launch_build(
     app: tauri::AppHandle,
     project_id: String,
@@ -379,6 +557,7 @@ fn launch_build(
     engine: String,
     directory: Option<String>,
     force: bool,
+    install: bool,
 ) -> Result<()> {
     let state = app.state::<AppState>();
     let root = root(&state, &project_id)?;
@@ -389,6 +568,9 @@ fn launch_build(
     if !document.ends_with(".tex") {
         return Err("Choose a .tex root document.".into());
     }
+    // Detect before taking the build lock: a cold MiKTeX start must not block Cancel.
+    let installer = Installer::new(detect_miktex(&app, &directory, &engine)?, install);
+    let tex = tex_root(&app, &project_id, &root)?;
     let mut active = state.build.lock().map_err(|e| e.to_string())?;
     if active.is_some() {
         return Err("A build is already running.".into());
@@ -398,14 +580,15 @@ fn launch_build(
     let mut cmd = compiler::configure_latexmk(
         &directory,
         &engine,
-        &root,
+        &tex,
         &document,
         Some(".localtex/build"),
         config.shell_escape && shell_trusted(&app, &project_id),
+        installer,
     )?;
     // -g reruns the engine without deleting auxiliary files or the last good PDF.
-    // Manual retries must not reuse latexmk's cached failure after package repair.
-    if force {
+    // Retries and package installs must not reuse latexmk's cached failure.
+    if force || install {
         cmd.arg("-g");
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -567,6 +750,7 @@ fn export_pdf(state: State<'_, AppState>, project_id: String, destination: Strin
 }
 #[tauri::command]
 async fn synctex(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     project_id: String,
     directory: Option<String>,
@@ -583,32 +767,75 @@ async fn synctex(
         .file_stem()
         .ok_or("Invalid root")?
         .to_string_lossy();
-    let pdf = root.join(".localtex/build").join(format!("{stem}.pdf"));
-    let mut cmd = compiler::command(compiler::executable(&directory, "synctex"));
-    compiler::apply_path(&mut cmd, &directory);
-    cmd.current_dir(&root);
-    if let Some(source) = source {
-        let path = workspace::safe_path(&root, &source, true)?;
-        cmd.arg("view")
-            .arg("-i")
-            .arg(format!(
-                "{}:0:{}",
-                line.unwrap_or(1),
-                paths::tool_path(&path)
-            ))
-            .arg("-o")
-            .arg(paths::tool_path(&pdf));
-    } else {
-        cmd.arg("edit").arg("-o").arg(format!(
-            "{}:{}:{}:{}",
-            page.unwrap_or(1),
-            x.unwrap_or(0.0),
-            y.unwrap_or(0.0),
-            paths::tool_path(&pdf)
-        ));
-    }
+    // Query in the form the build recorded: the folder TeX ran in.
+    let tex = paths::tool_path(&tex_root(&app, &project_id, &root)?);
+    let real = paths::tool_path(&root);
+    let pdf = format!(r"{tex}\.localtex\build\{stem}.pdf");
+    let source = source
+        .map(|source| {
+            workspace::safe_path(&root, &source, true)?;
+            Ok::<_, String>(source.replace('/', r"\"))
+        })
+        .transpose()?;
+    let synctex = move |args: Vec<String>| {
+        let mut cmd = compiler::command(compiler::executable(&directory, "synctex"));
+        compiler::apply_path(&mut cmd, &directory);
+        cmd.current_dir(&root).args(args);
+        compiler::output_timeout(cmd, Duration::from_secs(10))
+    };
     tauri::async_runtime::spawn_blocking(move || {
-        let (success, text) = compiler::output_timeout(cmd, Duration::from_secs(10))?;
+        let (success, text) = if let Some(source) = source {
+            let view = |input: &str| {
+                synctex(vec![
+                    "view".into(),
+                    "-i".into(),
+                    format!("{}:0:{input}", line.unwrap_or(1)),
+                    "-o".into(),
+                    pdf.clone(),
+                ])
+            };
+            // PDFs built before a folder change may have recorded the real or 8.3 form.
+            let full = format!(r"{real}\{source}");
+            let mut inputs = vec![format!(r"{tex}\{source}"), full.clone()];
+            inputs.extend(paths::short_path(&full));
+            inputs.dedup();
+            let mut result = (false, String::new());
+            for input in &inputs {
+                result = view(input)?;
+                if result.0 && result.1.contains("Page:") {
+                    break;
+                }
+            }
+            result
+        } else {
+            let (success, text) = synctex(vec![
+                "edit".into(),
+                "-o".into(),
+                format!(
+                    "{}:{}:{}:{pdf}",
+                    page.unwrap_or(1),
+                    x.unwrap_or(0.0),
+                    y.unwrap_or(0.0)
+                ),
+            ])?;
+            // Report the real path, so the interface can match it to a project file.
+            let text = text
+                .lines()
+                .map(|line| match line.strip_prefix("Input:").map(str::trim) {
+                    Some(input) => {
+                        let mapped = input
+                            .get(..tex.len())
+                            .filter(|prefix| prefix.eq_ignore_ascii_case(&tex))
+                            .map(|_| format!("{real}{}", &input[tex.len()..]))
+                            .or_else(|| paths::long_path(input));
+                        format!("Input:{}", mapped.as_deref().unwrap_or(input))
+                    }
+                    None => line.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (success, text)
+        };
         if success {
             Ok(text)
         } else {
@@ -663,7 +890,9 @@ pub fn run() {
             load_drafts,
             index_project,
             check_toolchain,
-            prepare_packages,
+            setup_status,
+            start_setup,
+            cancel_setup,
             test_compilation,
             start_build,
             cancel_build,

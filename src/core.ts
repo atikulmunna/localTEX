@@ -103,6 +103,23 @@ export function diagnostics(log: string): Diagnostic[] {
       ) === i,
   );
 }
+// Only package-provided files can be installed; a missing chapter.tex is the author's to fix.
+const packageFile = /\.(?:sty|cls|def|fd|cfg|clo|bst|bbx|cbx|lbx|dbx|tfm)$/;
+/** Package files a failed build could not find, for example ["kvsetkeys.sty"]. */
+export function missingFiles(log: string): string[] {
+  const files = new Set<string>();
+  for (const match of log.matchAll(
+    /(?:File|can't find file) [`']([^'`\s]+)' not found|I can't find file [`']([^'`\s]+)'/g,
+  )) {
+    const file = match[1] ?? match[2];
+    if (packageFile.test(file)) files.add(file);
+  }
+  for (const match of log.matchAll(
+    /Font \S+=(\S+) at \S+ not loadable: Metric \(TFM\) file not found/g,
+  ))
+    files.add(`${match[1]}.tfm`);
+  return [...files];
+}
 export function resolveBuild(
   project: Project,
   active?: DocumentFile,

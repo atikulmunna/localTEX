@@ -84,12 +84,64 @@ export function PdfPreview({ data, stale, sync, onInverse, onExport }: Props) {
   }, [sync, pdf]);
   return (
     <section className="pdf-pane" aria-label="PDF preview">
-      <div className="pane-toolbar">
-        <span className="pane-label">
-          <FileText size={14} /> PDF preview
-        </span>
-        <div className="toolbar-actions">
+      <div className="pane-toolbar pdf-controls">
+        <div className="toolbar-group">
+          <button
+            aria-label="Previous page"
+            className="icon-button"
+            disabled={!pdf || page <= 1}
+            onClick={() => setPage((p) => p - 1)}
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <span className="page-count">
+            {pdf ? `${page} / ${pdf.numPages}` : "No PDF yet"}
+          </span>
+          <button
+            aria-label="Next page"
+            className="icon-button"
+            disabled={!pdf || page >= pdf.numPages}
+            onClick={() => setPage((p) => p + 1)}
+          >
+            <ChevronRight size={18} />
+          </button>
+        </div>
+        <div className="toolbar-group">
           {stale && data && <span className="stale-pill">Previous build</span>}
+          <button
+            aria-label="Zoom out"
+            className="icon-button"
+            disabled={!pdf}
+            onClick={() => {
+              setFit(false);
+              setScale((s) => Math.max(0.4, s - 0.1));
+            }}
+          >
+            <Minus size={17} />
+          </button>
+          <span className="zoom-label">
+            {fit ? "Fit width" : `${Math.round(scale * 100)}%`}
+          </span>
+          <button
+            aria-label="Zoom in"
+            className="icon-button"
+            disabled={!pdf}
+            onClick={() => {
+              setFit(false);
+              setScale((s) => Math.min(3, s + 0.1));
+            }}
+          >
+            <Plus size={17} />
+          </button>
+          <button
+            aria-label="Fit PDF to width"
+            className={`icon-button ${fit ? "selected" : ""}`}
+            disabled={!pdf}
+            onClick={() => setFit(true)}
+          >
+            <Scan size={17} />
+          </button>
+          <span className="toolbar-divider" />
           <button
             className="icon-button"
             title="Export PDF"
@@ -97,14 +149,14 @@ export function PdfPreview({ data, stale, sync, onInverse, onExport }: Props) {
             disabled={!data}
             onClick={onExport}
           >
-            <Download size={15} />
+            <Download size={17} />
           </button>
         </div>
       </div>
       <div className="pdf-scroll" ref={scroller}>
         {error ? (
           <div className="empty-state">
-            <FileText />
+            <FileText size={28} />
             <h3>Couldn’t display this PDF</h3>
             <p>{error}</p>
           </div>
@@ -133,64 +185,14 @@ export function PdfPreview({ data, stale, sync, onInverse, onExport }: Props) {
               ))}
             </div>
             <div className="preview-invitation">
-              <span className="eyebrow">FROM SOURCE TO SOMETHING REAL</span>
               <h3>Your ideas, on paper.</h3>
-              <p>Compile your project to bring the preview to life.</p>
-              <kbd>Ctrl</kbd> + <kbd>Enter</kbd>
+              <p>Compile your project to see the PDF here.</p>
+              <span className="shortcut">
+                <kbd>Ctrl</kbd> <kbd>Enter</kbd>
+              </span>
             </div>
           </div>
         )}
-      </div>
-      <div className="pdf-controls">
-        <div>
-          <button
-            aria-label="Previous page"
-            className="icon-button"
-            disabled={!pdf || page <= 1}
-            onClick={() => setPage((p) => p - 1)}
-          >
-            <ChevronLeft size={16} />
-          </button>
-          <span>{pdf ? `${page} / ${pdf.numPages}` : "— / —"}</span>
-          <button
-            aria-label="Next page"
-            className="icon-button"
-            disabled={!pdf || page >= pdf.numPages}
-            onClick={() => setPage((p) => p + 1)}
-          >
-            <ChevronRight size={16} />
-          </button>
-        </div>
-        <div>
-          <button
-            aria-label="Zoom out"
-            className="icon-button"
-            onClick={() => {
-              setFit(false);
-              setScale((s) => Math.max(0.4, s - 0.1));
-            }}
-          >
-            <Minus size={15} />
-          </button>
-          <span>{fit ? "Fit width" : `${Math.round(scale * 100)}%`}</span>
-          <button
-            aria-label="Zoom in"
-            className="icon-button"
-            onClick={() => {
-              setFit(false);
-              setScale((s) => Math.min(3, s + 0.1));
-            }}
-          >
-            <Plus size={15} />
-          </button>
-          <button
-            aria-label="Fit PDF to width"
-            className={`icon-button ${fit ? "selected" : ""}`}
-            onClick={() => setFit(true)}
-          >
-            <Scan size={15} />
-          </button>
-        </div>
       </div>
     </section>
   );

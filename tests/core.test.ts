@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   diagnostics,
+  missingFiles,
   outline,
   projectSymbols,
   relativeSource,
@@ -11,6 +12,13 @@ import {
 } from "../src/core.ts";
 import type { DocumentFile, Project } from "../src/types.ts";
 import { SerialQueue } from '../src/serial.ts';
+import {
+  applySetupEvent,
+  beginSetup,
+  idleSetup,
+  setupProgress,
+} from "../src/setupState.ts";
+import type { SetupEvent } from "../src/types.ts";
 
 const docs: DocumentFile[] = [
   {
@@ -165,4 +173,41 @@ test('serial disk mutations remain ordered after a failed save',async()=>{
   const first=queue.run(async()=>{await new Promise(resolve=>setTimeout(resolve,5));calls.push(1);throw new Error('conflict');});
   const second=queue.run(async()=>{calls.push(2);return 'saved';});
   await assert.rejects(first,/conflict/);assert.equal(await second,'saved');assert.deepEqual(calls,[1,2]);
+});
+
+test("missing package files are found, but missing project files are not offered for install", () => {
+  const log = [
+    "! LaTeX Error: File `kvsetkeys.sty' not found.",
+    "! LaTeX Error: File `IEEEtran.cls' not found.",
+    "! LaTeX Error: File `kvsetkeys.sty' not found.",
+    "! LaTeX Error: File `chapter.tex' not found.",
+    "! I can't find file `fancyhdr.sty'.",
+    "! Font T1/cmr/m/n/10=ecrm1000 at 10.0pt not loadable: Metric (TFM) file not found.",
+  ].join("\n");
+  assert.deepEqual(missingFiles(log), [
+    "kvsetkeys.sty",
+    "IEEEtran.cls",
+    "fancyhdr.sty",
+    "ecrm1000.tfm",
+  ]);
+  assert.deepEqual(missingFiles("Output written on main.pdf (1 page)."), []);
+});
+test("setup progress follows its own run and ignores stale runs", () => {
+  const run = (event: Record<string, unknown>) =>
+    ({ runId: "current", ...event }) as SetupEvent;
+  let view = beginSetup(idleSetup(), "current");
+  assert.equal(setupProgress(view), 0);
+  view = applySetupEvent(view, run({ kind: "step", step: "tools", state: "done", text: "Found MiKTeX 26.5 and latexmk" }));
+  view = applySetupEvent(view, run({ kind: "progress", step: "packages", done: 1, total: 2, text: "Installing pgfplots" }));
+  assert.equal(view.steps.packages.text, "Installing pgfplots");
+  assert.ok(Math.abs(setupProgress(view) - 0.4) < 1e-9);
+  const stale = applySetupEvent(view, { ...run({ kind: "line", text: "old" }), runId: "previous" });
+  assert.equal(stale, view);
+  view = applySetupEvent(view, run({ kind: "finished", success: false, failure: { step: "packages", problem: "download", text: "Couldn't install pgfplots.\ncurl error 6" } }));
+  assert.equal(view.status, "failed");
+  assert.equal(view.steps.packages.state, "failed");
+  assert.equal(view.steps.packages.text, "Couldn't install pgfplots.");
+  view = beginSetup(view, "next");
+  assert.equal(view.failure, undefined);
+  assert.equal(view.steps.tools.state, "pending");
 });

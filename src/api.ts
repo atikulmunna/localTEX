@@ -8,6 +8,8 @@ import type {
   Project,
   ProjectConfig,
   Settings,
+  SetupEvent,
+  SetupStatus,
   ToolStatus,
 } from "./types";
 export const desktop = isTauri();
@@ -38,8 +40,11 @@ export const api = {
     invoke<void>("remove_draft", { project, path }),
   tools: (directory: string | null) =>
     invoke<ToolStatus[]>("check_toolchain", { directory }),
-  preparePackages: (directory: string | null) =>
-    invoke<string>("prepare_packages", { directory }),
+  setupStatus: (directory: string | null) =>
+    invoke<SetupStatus>("setup_status", { directory }),
+  startSetup: (runId: string, directory: string | null) =>
+    invoke<void>("start_setup", { runId, directory }),
+  cancelSetup: () => invoke<void>("cancel_setup"),
   test: (directory: string | null, engine: Engine) =>
     invoke<string>("test_compilation", { directory, engine }),
   build: (
@@ -49,6 +54,7 @@ export const api = {
     engine: Engine,
     directory: string | null,
     force: boolean,
+    install: boolean,
   ) =>
     invoke<void>("start_build", {
       projectId,
@@ -57,6 +63,7 @@ export const api = {
       engine,
       directory,
       force,
+      install,
     }),
   cancel: (projectId: string) => invoke<void>("cancel_build", { projectId }),
   pdf: async (projectId: string) =>
@@ -75,6 +82,8 @@ export const api = {
   }) => invoke<string>("synctex", args),
   onBuild: (handler: (event: BuildEvent) => void) =>
     listen<BuildEvent>("build-event", (e) => handler(e.payload)),
+  onSetup: (handler: (event: SetupEvent) => void) =>
+    listen<SetupEvent>("setup-event", (e) => handler(e.payload)),
   onFiles: (handler: (event: { projectId: string; paths: string[] }) => void) =>
     listen<{ projectId: string; paths: string[] }>("files-changed", (e) =>
       handler(e.payload),

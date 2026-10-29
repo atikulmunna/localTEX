@@ -1,12 +1,35 @@
 use crate::{process_job::ProcessJob, workspace::Result};
 use serde::Serialize;
 use std::{
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
+pub const ENGINES: &[&str] = &["pdflatex", "xelatex", "lualatex"];
+/// Error text returned when a supervised process was stopped on request.
+pub const CANCELLED: &str = "Cancelled.";
+/// MiKTeX's on-the-fly package installer. Other distributions have no equivalent flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Installer {
+    Unsupported,
+    Disabled,
+    Enabled,
+}
+impl Installer {
+    pub fn new(miktex: bool, allow_downloads: bool) -> Self {
+        match (miktex, allow_downloads) {
+            (false, _) => Installer::Unsupported,
+            (true, false) => Installer::Disabled,
+            (true, true) => Installer::Enabled,
+        }
+    }
+}
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolStatus {
@@ -51,6 +74,25 @@ pub fn apply_path(cmd: &mut Command, directory: &Option<String>) {
         }
     }
 }
+/// Starts the engine once to learn whether it belongs to MiKTeX. A cold MiKTeX start
+/// can take several seconds, so callers should cache the answer.
+pub fn is_miktex(directory: &Option<String>, engine: &str) -> Result<bool> {
+    if !ENGINES.contains(&engine) {
+        return Err("Unsupported LaTeX engine.".into());
+    }
+    let mut version = command(executable(directory, engine));
+    apply_path(&mut version, directory);
+    version.arg("--version");
+    let (ready, description) = output_timeout(version, Duration::from_secs(60)).map_err(|e| {
+        format!("{engine} could not start. Install MiKTeX, or choose its folder in Settings.\n{e}")
+    })?;
+    if !ready {
+        return Err(format!(
+            "{engine} is not ready. Finish your LaTeX installation, then try again.\n{description}"
+        ));
+    }
+    Ok(description.to_lowercase().contains("miktex"))
+}
 pub fn configure_latexmk(
     directory: &Option<String>,
     engine: &str,
@@ -58,20 +100,11 @@ pub fn configure_latexmk(
     root: &str,
     output: Option<&str>,
     shell_escape: bool,
+    installer: Installer,
 ) -> Result<Command> {
-    if !["pdflatex", "xelatex", "lualatex"].contains(&engine) {
+    if !ENGINES.contains(&engine) {
         return Err("Unsupported LaTeX engine.".into());
     }
-    let mut version = command(executable(directory, engine));
-    apply_path(&mut version, directory);
-    version.arg("--version");
-    let (ready, description) = output_timeout(version, Duration::from_secs(8))?;
-    if !ready {
-        return Err(format!(
-            "{engine} is not ready. Finish your LaTeX installation in Settings.\n{description}"
-        ));
-    }
-    let miktex = description.to_lowercase().contains("miktex");
     let mut cmd = command(executable(directory, "latexmk"));
     apply_path(&mut cmd, directory);
     cmd.current_dir(crate::paths::tool_path(working_directory))
@@ -92,11 +125,13 @@ pub fn configure_latexmk(
                 "-latexoption=-no-shell-escape"
             },
         ]);
-    // Avoid hidden package downloads or interactive installation dialogs during writing.
-    // These command templates contain only the validated engine name and constants.
-    if miktex {
-        cmd.arg(format!("-{engine}={engine} --disable-installer %O %S"));
-    }
+    // MiKTeX would otherwise show its own installation dialog mid-build. Downloads happen
+    // only when the user asked for them. The templates contain only the validated engine name.
+    match installer {
+        Installer::Disabled => cmd.arg(format!("-{engine}={engine} --disable-installer %O %S")),
+        Installer::Enabled => cmd.arg(format!("-{engine}={engine} --enable-installer %O %S")),
+        Installer::Unsupported => &mut cmd,
+    };
     if let Some(output) = output {
         cmd.arg(format!("-outdir={output}"));
     }
@@ -155,6 +190,100 @@ pub fn output_timeout_limit(
     bytes.extend(b.join().unwrap_or_default());
     Ok((success, String::from_utf8_lossy(&bytes).trim().to_string()))
 }
+/// Like `output_timeout_limit`, but reports each output line as it arrives, keeps the
+/// last `limit` bytes (where errors appear), and stops the process tree once `cancelled` is set.
+pub fn output_streaming(
+    mut cmd: Command,
+    timeout: Duration,
+    limit: usize,
+    cancelled: &AtomicBool,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<(bool, String)> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let job = ProcessJob::attach(&child).map_err(|e| {
+        kill_tree(&mut child);
+        e.to_string()
+    })?;
+    let (sender, receiver) = mpsc::channel::<String>();
+    let pipes: [Option<Box<dyn Read + Send>>; 2] = [
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    ];
+    let readers: Vec<_> = pipes
+        .into_iter()
+        .flatten()
+        .map(|pipe| {
+            let sender = sender.clone();
+            thread::spawn(move || {
+                for line in BufReader::new(pipe).split(b'\n') {
+                    let Ok(bytes) = line else { break };
+                    let text = String::from_utf8_lossy(&bytes).trim_end().to_string();
+                    if sender.send(text).is_err() {
+                        break;
+                    }
+                }
+            })
+        })
+        .collect();
+    drop(sender);
+    let mut output = String::new();
+    let mut record = |line: String, output: &mut String| {
+        on_line(&line);
+        output.push_str(&line);
+        output.push('\n');
+        if output.len() > limit {
+            let cut = (output.len() - limit..output.len())
+                .find(|&i| output.is_char_boundary(i))
+                .unwrap_or(output.len());
+            output.drain(..cut);
+        }
+    };
+    let start = Instant::now();
+    let stop = |job: &ProcessJob, child: &mut Child| {
+        job.terminate();
+        kill_tree(child);
+    };
+    let success = loop {
+        if cancelled.load(Ordering::SeqCst) {
+            stop(&job, &mut child);
+            return Err(CANCELLED.into());
+        }
+        if start.elapsed() > timeout {
+            stop(&job, &mut child);
+            return Err(
+                "Timed out. Check your internet connection and LaTeX installation, then try again."
+                    .into(),
+            );
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) => (),
+            Err(e) => return Err(e.to_string()),
+        }
+        if let Ok(line) = receiver.recv_timeout(Duration::from_millis(40)) {
+            record(line, &mut output);
+        }
+    };
+    // Descendants can keep the pipes open after the main process exits.
+    job.terminate();
+    for reader in readers {
+        let _ = reader.join();
+    }
+    for line in receiver.try_iter() {
+        record(line, &mut output);
+    }
+    Ok((success, output.trim().to_string()))
+}
 fn drain(mut reader: impl Read, limit: usize) -> Vec<u8> {
     let mut result = Vec::new();
     let mut buffer = [0; 8192];
@@ -169,29 +298,46 @@ fn drain(mut reader: impl Read, limit: usize) -> Vec<u8> {
     }
     result
 }
+const TOOLS: &[&str] = &[
+    "pdflatex", "xelatex", "lualatex", "latexmk", "synctex", "bibtex", "biber", "perl",
+];
+fn check_tool(directory: &Option<String>, name: &str) -> ToolStatus {
+    let mut cmd = command(executable(directory, name));
+    apply_path(&mut cmd, directory);
+    cmd.arg("--version");
+    match output_timeout(cmd, Duration::from_secs(30)) {
+        Ok((success, text)) => ToolStatus {
+            name: name.into(),
+            available: success,
+            detail: text.chars().take(1800).collect(),
+        },
+        Err(detail) => ToolStatus {
+            name: name.into(),
+            available: false,
+            detail,
+        },
+    }
+}
+/// Checks every tool at once; a cold MiKTeX start would otherwise multiply the wait.
 pub fn check_tools(directory: Option<String>) -> Vec<ToolStatus> {
-    [
-        "pdflatex", "xelatex", "lualatex", "latexmk", "synctex", "bibtex", "biber", "perl",
-    ]
-    .into_iter()
-    .map(|name| {
-        let mut cmd = command(executable(&directory, name));
-        apply_path(&mut cmd, &directory);
-        cmd.arg("--version");
-        match output_timeout(cmd, Duration::from_secs(8)) {
-            Ok((success, text)) => ToolStatus {
-                name: name.into(),
-                available: success,
-                detail: text.chars().take(1800).collect(),
-            },
-            Err(detail) => ToolStatus {
+    let checks: Vec<_> = TOOLS
+        .iter()
+        .map(|&name| {
+            let directory = directory.clone();
+            thread::spawn(move || check_tool(&directory, name))
+        })
+        .collect();
+    checks
+        .into_iter()
+        .zip(TOOLS)
+        .map(|(check, &name)| {
+            check.join().unwrap_or_else(|_| ToolStatus {
                 name: name.into(),
                 available: false,
-                detail,
-            },
-        }
-    })
-    .collect()
+                detail: "The check stopped unexpectedly.".into(),
+            })
+        })
+        .collect()
 }
 #[cfg(test)]
 mod tests {
@@ -244,5 +390,59 @@ mod tests {
             .unwrap_err()
             .contains("Timed out"));
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn streaming_reports_lines_keeps_the_tail_and_stops_on_request() {
+        let mut echo = command("powershell.exe");
+        echo.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Write-Output 'first line'; Write-Output 'second line'",
+        ]);
+        let mut lines = Vec::new();
+        let running = AtomicBool::new(false);
+        let (ok, text) = output_streaming(echo, Duration::from_secs(20), 12, &running, &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+        assert!(ok);
+        assert_eq!(lines, ["first line", "second line"]);
+        assert_eq!(text, "second line");
+        let mut slow = command("powershell.exe");
+        slow.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Sleep -Seconds 30",
+        ]);
+        let stopped = AtomicBool::new(true);
+        let start = Instant::now();
+        assert_eq!(
+            output_streaming(slow, Duration::from_secs(60), 1024, &stopped, &mut |_| {})
+                .unwrap_err(),
+            CANCELLED
+        );
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+    #[test]
+    fn installer_flag_follows_distribution_and_consent() {
+        assert_eq!(Installer::new(false, true), Installer::Unsupported);
+        assert_eq!(Installer::new(true, false), Installer::Disabled);
+        assert_eq!(Installer::new(true, true), Installer::Enabled);
+        let command = configure_latexmk(
+            &None,
+            "pdflatex",
+            Path::new("."),
+            "main.tex",
+            None,
+            false,
+            Installer::Enabled,
+        )
+        .unwrap();
+        assert!(command
+            .get_args()
+            .any(|a| a == "-pdflatex=pdflatex --enable-installer %O %S"));
     }
 }
