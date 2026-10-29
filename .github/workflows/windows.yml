@@ -1,0 +1,41 @@
+name: Windows desktop checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Check frontend and core behavior
+        run: |
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path crates/localtex-core/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Install test browser
+        run: npx playwright install chromium
+      - name: Exercise the browser preview
+        run: npm run test:e2e
+      - name: Build Windows installer
+        run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: localtex-windows-unsigned
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-traces
+          path: test-results/
