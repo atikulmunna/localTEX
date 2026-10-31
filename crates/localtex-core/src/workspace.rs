@@ -51,14 +51,106 @@ pub fn hash(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 pub fn editable(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if matches!(name.as_str(), "latexmkrc" | ".latexmkrc") {
+        return true;
+    }
     matches!(
         path.extension()
             .and_then(|v| v.to_str())
             .unwrap_or("")
             .to_lowercase()
             .as_str(),
-        "tex" | "bib" | "sty" | "cls" | "txt" | "md" | "bst" | "csv"
+        "tex"
+            | "ltx"
+            | "bib"
+            | "sty"
+            | "cls"
+            | "clo"
+            | "cfg"
+            | "def"
+            | "fd"
+            | "dtx"
+            | "ins"
+            | "bst"
+            | "bbx"
+            | "cbx"
+            | "lbx"
+            | "dbx"
+            | "ist"
+            | "tikz"
+            | "pgf"
+            | "lua"
+            | "txt"
+            | "md"
+            | "csv"
+            | "json"
+            | "yaml"
+            | "yml"
     )
+}
+/// Files that other editors' builds leave beside the source (TeXstudio, VS Code,
+/// TeXworks). They are hidden from the project so it stays readable.
+const BUILD_OUTPUTS: &[&str] = &[
+    ".aux",
+    ".log",
+    ".out",
+    ".toc",
+    ".lof",
+    ".lot",
+    ".loa",
+    ".lol",
+    ".fls",
+    ".fdb_latexmk",
+    ".synctex",
+    ".synctex.gz",
+    ".synctex(busy)",
+    ".synctex.gz(busy)",
+    ".bbl",
+    ".blg",
+    ".bcf",
+    ".run.xml",
+    ".idx",
+    ".ilg",
+    ".ind",
+    ".glo",
+    ".gls",
+    ".glg",
+    ".acn",
+    ".acr",
+    ".alg",
+    ".nlo",
+    ".nls",
+    ".nav",
+    ".snm",
+    ".vrb",
+    ".xdv",
+    ".dvi",
+    ".thm",
+];
+fn build_output(name: &str) -> bool {
+    let name = name.to_lowercase();
+    BUILD_OUTPUTS.iter().any(|suffix| name.ends_with(suffix))
+}
+const BOM: &str = "\u{feff}";
+/// How a file on disk is laid out, so a save keeps the author's line endings and
+/// byte-order mark instead of rewriting every line for other editors and git.
+struct Layout {
+    crlf: bool,
+    bom: bool,
+}
+fn layout(bytes: &[u8]) -> Layout {
+    let crlf = bytes.windows(2).filter(|pair| pair == b"\r\n").count();
+    let lf = bytes.iter().filter(|&&byte| byte == b'\n').count();
+    Layout {
+        // Mixed files follow whichever ending most lines use.
+        crlf: crlf * 2 > lf,
+        bom: bytes.starts_with(BOM.as_bytes()),
+    }
 }
 pub fn relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
@@ -88,6 +180,11 @@ pub fn read(root: &Path, name: &str) -> Result<Document> {
     let revision = hash(&bytes);
     let text = String::from_utf8(bytes)
         .map_err(|_| "This file is not UTF-8. Convert it to UTF-8 before editing.".to_string())?;
+    // The editor works with "\n" and no byte-order mark; `save` restores the file's own layout.
+    let text = text
+        .strip_prefix(BOM)
+        .unwrap_or(&text)
+        .replace("\r\n", "\n");
     Ok(Document {
         path: name.into(),
         text,
@@ -103,8 +200,18 @@ pub fn save(root: &Path, doc: &Document) -> Result<String> {
                 .into(),
         );
     }
-    atomic_write(&path, doc.text.as_bytes())?;
-    Ok(hash(doc.text.as_bytes()))
+    let layout = layout(&current);
+    let body = doc.text.strip_prefix(BOM).unwrap_or(&doc.text);
+    let mut text = if layout.crlf {
+        body.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        body.to_string()
+    };
+    if layout.bom {
+        text.insert_str(0, BOM);
+    }
+    atomic_write(&path, text.as_bytes())?;
+    Ok(hash(text.as_bytes()))
 }
 pub fn inspect(root: &Path) -> Result<Project> {
     let mut files = Vec::new();
@@ -113,15 +220,15 @@ pub fn inspect(root: &Path) -> Result<Project> {
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
-            e.depth() == 0
-                || !matches!(
-                    e.file_name().to_str().unwrap_or(""),
-                    ".git" | ".localtex" | "node_modules" | "target"
-                )
+            let name = e.file_name().to_str().unwrap_or("");
+            // Hidden folders (.git, .localtex, .vscode) and minted caches are not project source.
+            let hidden_folder =
+                e.file_type().is_dir() && (name.starts_with('.') || name.starts_with("_minted"));
+            e.depth() == 0 || !(hidden_folder || matches!(name, "node_modules" | "target"))
         });
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
-        if !entry.file_type().is_file() {
+        if !entry.file_type().is_file() || build_output(&entry.file_name().to_string_lossy()) {
             continue;
         }
         if files.len() >= 20000 {
@@ -134,10 +241,11 @@ pub fn inspect(root: &Path) -> Result<Project> {
         let size = entry.metadata().map_err(|e| e.to_string())?.len();
         if path.ends_with(".tex") && size <= MAX_TEXT {
             if let Ok(text) = fs::read_to_string(entry.path()) {
-                if text
-                    .lines()
-                    .any(|l| l.trim_start().starts_with("\\documentclass"))
-                {
+                if text.lines().any(|l| {
+                    l.trim_start_matches(BOM)
+                        .trim_start()
+                        .starts_with("\\documentclass")
+                }) {
                     roots.push(path.clone());
                 }
             }
@@ -219,6 +327,96 @@ mod tests {
         save(&root, &doc).unwrap();
         assert_eq!(fs::read_to_string(root.join(&doc.path)).unwrap(), "second");
         assert!(save(&root, &doc).unwrap_err().starts_with("CONFLICT:"));
+    }
+    #[test]
+    fn saving_keeps_windows_line_endings_and_byte_order_mark() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let original = "\u{feff}\\documentclass{article}\r\n\\begin{document}\r\nHi\r\n";
+        fs::write(root.join("main.tex"), original).unwrap();
+        let mut doc = read(&root, "main.tex").unwrap();
+        // The editor sees plain "\n" text without the invisible mark.
+        assert_eq!(
+            doc.text,
+            "\\documentclass{article}\n\\begin{document}\nHi\n"
+        );
+        doc.text.push_str("More\n");
+        let revision = save(&root, &doc).unwrap();
+        let written = fs::read_to_string(root.join("main.tex")).unwrap();
+        assert_eq!(written, format!("{original}More\r\n"));
+        assert_eq!(revision, hash(written.as_bytes()));
+        // An unchanged round trip writes identical bytes, so git sees no difference.
+        let doc = read(&root, "main.tex").unwrap();
+        save(&root, &doc).unwrap();
+        assert_eq!(fs::read_to_string(root.join("main.tex")).unwrap(), written);
+    }
+    #[test]
+    fn unix_files_stay_unix_and_mixed_files_follow_most_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::write(root.join("unix.tex"), "a\nb\n").unwrap();
+        let mut doc = read(&root, "unix.tex").unwrap();
+        doc.text.push_str("c\n");
+        save(&root, &doc).unwrap();
+        assert_eq!(fs::read(root.join("unix.tex")).unwrap(), b"a\nb\nc\n");
+        fs::write(root.join("mixed.tex"), "a\r\nb\r\nc\n").unwrap();
+        let doc = read(&root, "mixed.tex").unwrap();
+        save(&root, &doc).unwrap();
+        assert_eq!(
+            fs::read(root.join("mixed.tex")).unwrap(),
+            b"a\r\nb\r\nc\r\n"
+        );
+    }
+    #[test]
+    fn projects_from_other_editors_open_cleanly() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        // Saved with a byte-order mark, as Notepad and some Windows editors do.
+        fs::write(
+            root.join("main.tex"),
+            "\u{feff}\\documentclass{article}\r\n",
+        )
+        .unwrap();
+        for leftover in [
+            "main.aux",
+            "main.log",
+            "main.synctex.gz",
+            "main.fdb_latexmk",
+            "main.bbl",
+        ] {
+            fs::write(root.join(leftover), "").unwrap();
+        }
+        for folder in [".vscode", "_minted-main"] {
+            fs::create_dir(root.join(folder)).unwrap();
+            fs::write(root.join(folder).join("settings.json"), "{}").unwrap();
+        }
+        for source in [
+            "latexmkrc",
+            "style.cfg",
+            "custom.bbx",
+            "figure.tikz",
+            "main.pdf",
+        ] {
+            fs::write(root.join(source), "").unwrap();
+        }
+        let project = inspect(root).unwrap();
+        assert_eq!(project.roots, vec!["main.tex"]);
+        let listed: Vec<(&str, bool)> = project
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.editable))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("custom.bbx", true),
+                ("figure.tikz", true),
+                ("latexmkrc", true),
+                ("main.pdf", false),
+                ("main.tex", true),
+                ("style.cfg", true),
+            ]
+        );
     }
     #[test]
     fn discovers_roots_and_ignores_build_outputs() {

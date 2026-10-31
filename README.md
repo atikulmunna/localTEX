@@ -74,6 +74,17 @@ Configuration lives in `.localtex/project.json`; build artifacts live in `.local
 
 `latexmk` runs with `-norc`: arbitrary `.latexmkrc` scripts are not loaded. Engine commands are restricted to pdfLaTeX, XeLaTeX, and LuaLaTeX. MiKTeX engine invocations disable automatic package installation unless you choose **Install and compile** or turn on automatic installs. The external TeX distribution remains responsible for its helper programs and configuration. Shell escape explicitly grants external-program execution.
 
+### Working alongside other editors
+
+A localTEX project is an ordinary folder, so the same folder opens in TeXstudio, VS Code, TeXworks, or Overleaf (zip it and upload). localTEX adds only a hidden `.localtex` folder for its settings and build output, which other editors ignore.
+
+- Saving keeps each file's own line endings (Windows CRLF or Unix LF) and its UTF-8 byte-order mark, so files edited elsewhere don't show every line as changed in git.
+- `% !TeX root` and `% !TeX program` magic comments work as in TeXstudio and VS Code.
+- Build files other editors leave beside the source (`.aux`, `.log`, `.synctex.gz`, `.fdb_latexmk`, `.bbl` and similar), hidden folders such as `.vscode`, and `_minted` caches are left out of the file list.
+- Besides `.tex` and `.bib`, the editor opens `.sty`, `.cls`, `.clo`, `.cfg`, `.def`, `.fd`, `.dtx`, `.ins`, `.bst`, `.bbx`, `.cbx`, `.lbx`, `.dbx`, `.ist`, `.tikz`, `.pgf`, `.lua`, `.ltx`, `latexmkrc`, `.txt`, `.md`, `.csv`, `.json`, and `.yaml` files.
+- The PDF is written to `.localtex/build/`, not beside `main.tex`; use Export for a copy elsewhere.
+- Not yet supported: files in encodings other than UTF-8 (convert them first), and projects that depend on a `latexmkrc` to build. Overleaf downloads don't record the engine; set it in Settings or add `% !TeX program = xelatex`.
+
 V1 opens UTF-8 source files up to 8 MB, indexes up to 32 MB of project text, and lists up to 20,000 files. Source paths must stay within the project. File creation supports paths in existing directories. Rename does not rewrite `\input`, bibliography, or image references. Projects with custom build scripts or legacy source encodings may require adaptation.
 
 ## Tests

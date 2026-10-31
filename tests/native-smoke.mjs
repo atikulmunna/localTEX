@@ -1,7 +1,7 @@
 // Run against a debug desktop instance started with a loopback WebView2 debug port.
 import {chromium} from '@playwright/test';
 import assert from 'node:assert/strict';
-import {mkdir,writeFile} from 'node:fs/promises';
+import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 
 const browser=await chromium.connectOverCDP('http://127.0.0.1:9223');
@@ -31,6 +31,12 @@ await invoke('save_draft',{draft});assert.equal((await invoke('load_drafts',{pro
 await invoke('remove_draft',{project:project.id,path:draft.path});assert.deepEqual(await invoke('load_drafts',{project:project.id}),[]);
 await writeFile(join(directory,'main.tex'),'% An external edit\n'+savedText,'utf8');
 const refreshed=await invoke('read_file',{projectId:project.id,path:'main.tex'});assert.notEqual(refreshed.revision,revision);
+// Files from Windows editors keep their CRLF line endings and byte-order mark when saved.
+await writeFile(join(directory,'windows.tex'),'\ufeff% From a Windows editor\r\nLine two\r\n','utf8');
+const windows=await invoke('read_file',{projectId:project.id,path:'windows.tex'});
+assert.equal(windows.text,'% From a Windows editor\nLine two\n');
+await invoke('save_file',{projectId:project.id,document:{...windows,text:windows.text+'Line three\n'}});
+assert.equal(await readFile(join(directory,'windows.tex'),'utf8'),'\ufeff% From a Windows editor\r\nLine two\r\nLine three\r\n');
 const indexed=await invoke('index_project',{projectId:project.id});assert.ok(indexed.some(d=>d.path==='renamed notes.tex'));
 // A copied project's config cannot grant shell execution without local consent.
 await writeFile(join(directory,'.localtex','project.json'),JSON.stringify({version:1,root:'main.tex',engine:'pdflatex',shellEscape:true}),'utf8');
@@ -44,5 +50,5 @@ await page.getByRole('button',{name:/^Compile/}).click();
 await page.locator('.pdf-page canvas').waitFor({timeout:5*60_000});
 await page.getByText('PDF is up to date').waitFor();
 await page.screenshot({path:'.cache/native-workspace.png'});
-console.log('Native smoke passed: first-launch LaTeX setup, remembered setup, project creation/open, file read/save/conflict, traversal rejection, rename, settings, recovery, indexing, local trust, UI project loading, and a real compile to PDF.');
+console.log('Native smoke passed: first-launch LaTeX setup, remembered setup, project creation/open, file read/save/conflict, traversal rejection, rename, settings, recovery, indexing, local trust, UI project loading, CRLF/BOM-preserving saves, and a real compile to PDF.');
 await browser.close();
