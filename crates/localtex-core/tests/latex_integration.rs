@@ -43,6 +43,7 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
         None,
         false,
         installer,
+        None,
     )
     .unwrap();
     let (success, log) = output_timeout(figure, Duration::from_secs(600)).unwrap();
@@ -55,6 +56,7 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
         Some(".localtex/build"),
         false,
         installer,
+        None,
     )
     .unwrap();
     let (success, log) = output_timeout(main, Duration::from_secs(90)).unwrap();
@@ -99,6 +101,27 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
         real.contains("Research বাংলা with spaces"),
         "{input} -> {real}"
     );
+    // A trusted latexmkrc is read, and localTEX's own options still win over it.
+    fs::write(
+        root.join("latexmkrc"),
+        "print \"localtex rc loaded\\n\";\n$out_dir = 'rc-out';\n",
+    )
+    .unwrap();
+    let with_rc = configure_latexmk(
+        &directory,
+        engine,
+        &root,
+        "figure.tex",
+        Some(".localtex/build"),
+        false,
+        installer,
+        Some("latexmkrc"),
+    )
+    .unwrap();
+    let (success, log) = output_timeout(with_rc, Duration::from_secs(90)).unwrap();
+    assert!(success && log.contains("localtex rc loaded"), "{log}");
+    assert!(output.join("figure.pdf").exists());
+    assert!(!root.join("rc-out").exists());
     // A failed rebuild must be observable rather than treated as a fresh PDF.
     fs::write(root.join("chapter.tex"), r"\undefinedLocaltexCommand").unwrap();
     let broken = configure_latexmk(
@@ -109,6 +132,7 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
         Some(".localtex/build"),
         false,
         installer,
+        None,
     )
     .unwrap();
     let (ok, result) = output_timeout(broken, Duration::from_secs(90)).unwrap();

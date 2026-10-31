@@ -1,3 +1,4 @@
+use crate::encoding;
 pub use crate::paths::safe_path;
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
@@ -14,6 +15,9 @@ pub struct ProjectConfig {
     pub engine: Option<String>,
     #[serde(default)]
     pub shell_escape: bool,
+    /// Read the project's latexmkrc. Like shell escape, it needs local consent too.
+    #[serde(default)]
+    pub latexmkrc: bool,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +31,9 @@ pub struct Document {
     pub path: String,
     pub text: String,
     pub revision: String,
+    /// Shown to the user; saving follows the encoding of the file on disk.
+    #[serde(default)]
+    pub encoding: String,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -178,8 +185,8 @@ pub fn read(root: &Path, name: &str) -> Result<Document> {
     }
     let bytes = fs::read(path).map_err(|e| e.to_string())?;
     let revision = hash(&bytes);
-    let text = String::from_utf8(bytes)
-        .map_err(|_| "This file is not UTF-8. Convert it to UTF-8 before editing.".to_string())?;
+    let encoding = encoding::detect(&bytes);
+    let text = encoding::decode(&bytes, encoding);
     // The editor works with "\n" and no byte-order mark; `save` restores the file's own layout.
     let text = text
         .strip_prefix(BOM)
@@ -189,6 +196,7 @@ pub fn read(root: &Path, name: &str) -> Result<Document> {
         path: name.into(),
         text,
         revision,
+        encoding: encoding.name().into(),
     })
 }
 pub fn save(root: &Path, doc: &Document) -> Result<String> {
@@ -210,8 +218,16 @@ pub fn save(root: &Path, doc: &Document) -> Result<String> {
     if layout.bom {
         text.insert_str(0, BOM);
     }
-    atomic_write(&path, text.as_bytes())?;
-    Ok(hash(text.as_bytes()))
+    let encoding = encoding::detect(&current);
+    let bytes = encoding::encode(&text, encoding).map_err(|c| {
+        format!(
+            "{} is saved as {}, which can’t store “{c}”. Remove that character, or convert the file to UTF-8.",
+            doc.path,
+            encoding.name()
+        )
+    })?;
+    atomic_write(&path, &bytes)?;
+    Ok(hash(&bytes))
 }
 pub fn inspect(root: &Path) -> Result<Project> {
     let mut files = Vec::new();
@@ -240,7 +256,8 @@ pub fn inspect(root: &Path) -> Result<Project> {
         let path = relative(root, entry.path());
         let size = entry.metadata().map_err(|e| e.to_string())?.len();
         if path.ends_with(".tex") && size <= MAX_TEXT {
-            if let Ok(text) = fs::read_to_string(entry.path()) {
+            if let Ok(bytes) = fs::read(entry.path()) {
+                let text = encoding::decode(&bytes, encoding::detect(&bytes));
                 if text.lines().any(|l| {
                     l.trim_start_matches(BOM)
                         .trim_start()
@@ -417,6 +434,29 @@ mod tests {
                 ("style.cfg", true),
             ]
         );
+    }
+    #[test]
+    fn latin1_projects_open_and_save_in_their_own_encoding() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let original = b"\\documentclass{article}\r\n\\usepackage[latin1]{inputenc}\r\nCaf\xe9\r\n";
+        fs::write(root.join("main.tex"), original).unwrap();
+        assert_eq!(inspect(&root).unwrap().roots, vec!["main.tex"]);
+        let mut doc = read(&root, "main.tex").unwrap();
+        assert_eq!(doc.encoding, "Windows-1252");
+        assert!(doc.text.ends_with("Café\n"));
+        doc.text.push_str("Na\u{ef}ve\n");
+        doc.revision = save(&root, &doc).unwrap();
+        let mut expected = original.to_vec();
+        expected.extend(b"Na\xefve\r\n");
+        assert_eq!(fs::read(root.join("main.tex")).unwrap(), expected);
+        doc.text.push_str("গবেষণা\n");
+        let error = save(&root, &doc).unwrap_err();
+        assert!(
+            error.contains("Windows-1252") && error.contains('গ'),
+            "{error}"
+        );
+        assert_eq!(fs::read(root.join("main.tex")).unwrap(), expected);
     }
     #[test]
     fn discovers_roots_and_ignores_build_outputs() {

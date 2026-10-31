@@ -93,6 +93,7 @@ pub fn is_miktex(directory: &Option<String>, engine: &str) -> Result<bool> {
     }
     Ok(description.to_lowercase().contains("miktex"))
 }
+#[allow(clippy::too_many_arguments)]
 pub fn configure_latexmk(
     directory: &Option<String>,
     engine: &str,
@@ -101,6 +102,7 @@ pub fn configure_latexmk(
     output: Option<&str>,
     shell_escape: bool,
     installer: Installer,
+    rc_file: Option<&str>,
 ) -> Result<Command> {
     if !ENGINES.contains(&engine) {
         return Err("Unsupported LaTeX engine.".into());
@@ -108,23 +110,28 @@ pub fn configure_latexmk(
     let mut cmd = command(executable(directory, "latexmk"));
     apply_path(&mut cmd, directory);
     cmd.current_dir(crate::paths::tool_path(working_directory))
-        .args([
-            "-norc",
-            match engine {
-                "xelatex" => "-xelatex",
-                "lualatex" => "-lualatex",
-                _ => "-pdf",
-            },
-            "-interaction=nonstopmode",
-            "-halt-on-error",
-            "-file-line-error",
-            "-synctex=1",
-            if shell_escape {
-                "-latexoption=-shell-escape"
-            } else {
-                "-latexoption=-no-shell-escape"
-            },
-        ]);
+        .arg("-norc");
+    // A project rc file is Perl that latexmk runs, so it is read only for a project the
+    // user trusted. The options after it take precedence over anything it sets.
+    if let Some(rc) = rc_file {
+        cmd.arg("-r").arg(format!("./{rc}"));
+    }
+    cmd.args([
+        match engine {
+            "xelatex" => "-xelatex",
+            "lualatex" => "-lualatex",
+            _ => "-pdf",
+        },
+        "-interaction=nonstopmode",
+        "-halt-on-error",
+        "-file-line-error",
+        "-synctex=1",
+        if shell_escape {
+            "-latexoption=-shell-escape"
+        } else {
+            "-latexoption=-no-shell-escape"
+        },
+    ]);
     // MiKTeX would otherwise show its own installation dialog mid-build. Downloads happen
     // only when the user asked for them. The templates contain only the validated engine name.
     match installer {
@@ -439,10 +446,15 @@ mod tests {
             None,
             false,
             Installer::Enabled,
+            Some("latexmkrc"),
         )
         .unwrap();
-        assert!(command
+        let args: Vec<_> = command
             .get_args()
-            .any(|a| a == "-pdflatex=pdflatex --enable-installer %O %S"));
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"-pdflatex=pdflatex --enable-installer %O %S".into()));
+        // Only the trusted project rc is read, and localTEX's options come after it.
+        assert_eq!(args[..4], ["-norc", "-r", "./latexmkrc", "-pdf"]);
     }
 }

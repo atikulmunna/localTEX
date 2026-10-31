@@ -4,6 +4,7 @@ export interface ProjectConfig {
   root: string | null;
   engine: Engine | null;
   shellEscape: boolean;
+  latexmkrc: boolean;
 }
 export interface ProjectFile {
   path: string;
@@ -22,6 +23,8 @@ export interface DocumentFile {
   path: string;
   text: string;
   revision: string;
+  /** "UTF-8" or "Windows-1252"; saving keeps the file's own encoding. */
+  encoding?: string;
 }
 export interface BufferFile extends DocumentFile {
   savedText: string;

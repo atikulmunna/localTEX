@@ -1,7 +1,7 @@
 // Run against a debug desktop instance started with a loopback WebView2 debug port.
 import {chromium} from '@playwright/test';
 import assert from 'node:assert/strict';
-import {mkdir,readFile,writeFile} from 'node:fs/promises';
+import {mkdir,readFile,rm,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 
 const browser=await chromium.connectOverCDP('http://127.0.0.1:9223');
@@ -37,10 +37,21 @@ const windows=await invoke('read_file',{projectId:project.id,path:'windows.tex'}
 assert.equal(windows.text,'% From a Windows editor\nLine two\n');
 await invoke('save_file',{projectId:project.id,document:{...windows,text:windows.text+'Line three\n'}});
 assert.equal(await readFile(join(directory,'windows.tex'),'utf8'),'\ufeff% From a Windows editor\r\nLine two\r\nLine three\r\n');
+// Older projects in Windows-1252 (latin1, ansinew) open and save in their own encoding.
+await writeFile(join(directory,'latin1.tex'),Buffer.from([0x43,0x61,0x66,0xe9,0x0d,0x0a]));
+const latin1=await invoke('read_file',{projectId:project.id,path:'latin1.tex'});
+assert.equal(latin1.encoding,'Windows-1252');assert.equal(latin1.text,'Café\n');
+await invoke('save_file',{projectId:project.id,document:{...latin1,text:latin1.text+'Naïve\n'}});
+assert.deepEqual([...await readFile(join(directory,'latin1.tex'))],[0x43,0x61,0x66,0xe9,0x0d,0x0a,0x4e,0x61,0xef,0x76,0x65,0x0d,0x0a]);
 const indexed=await invoke('index_project',{projectId:project.id});assert.ok(indexed.some(d=>d.path==='renamed notes.tex'));
-// A copied project's config cannot grant shell execution without local consent.
-await writeFile(join(directory,'.localtex','project.json'),JSON.stringify({version:1,root:'main.tex',engine:'pdflatex',shellEscape:true}),'utf8');
-const untrusted=await invoke('refresh_project',{projectId:project.id});assert.equal(untrusted.config.shellEscape,false);
+// A copied project's config cannot grant shell execution or its latexmkrc without local consent.
+await writeFile(join(directory,'latexmkrc'),'print "localtex rc loaded\\n";\n','utf8');
+await writeFile(join(directory,'.localtex','project.json'),JSON.stringify({version:1,root:'main.tex',engine:'pdflatex',shellEscape:true,latexmkrc:true}),'utf8');
+const untrusted=await invoke('refresh_project',{projectId:project.id});
+assert.equal(untrusted.config.shellEscape,false);assert.equal(untrusted.config.latexmkrc,false);
+// Consent given in this app is recorded locally, so the next build reads the rc file.
+await invoke('save_project_config',{projectId:project.id,config:{version:1,root:'main.tex',engine:'pdflatex',shellEscape:false,latexmkrc:true}});
+assert.equal((await invoke('refresh_project',{projectId:project.id})).config.latexmkrc,true);
 await invoke('save_settings',{settings:{recent:[directory],toolDirectory:null}});
 await page.reload();await page.getByRole('button').filter({hasText:project.name}).click();
 await page.getByRole('textbox',{name:'LaTeX source editor'}).waitFor();
@@ -50,5 +61,10 @@ await page.getByRole('button',{name:/^Compile/}).click();
 await page.locator('.pdf-page canvas').waitFor({timeout:5*60_000});
 await page.getByText('PDF is up to date').waitFor();
 await page.screenshot({path:'.cache/native-workspace.png'});
-console.log('Native smoke passed: first-launch LaTeX setup, remembered setup, project creation/open, file read/save/conflict, traversal rejection, rename, settings, recovery, indexing, local trust, UI project loading, CRLF/BOM-preserving saves, and a real compile to PDF.');
+await page.locator('.build-status').click();
+await page.getByRole('button',{name:'Compiler output',exact:true}).click();
+assert.match(await page.locator('.compiler-log').innerText(),/localtex rc loaded/);
+console.log('Native smoke passed: first-launch LaTeX setup, remembered setup, project creation/open, file read/save/conflict, traversal rejection, rename, settings, recovery, indexing, local trust, UI project loading, CRLF/BOM-preserving saves, Windows-1252 files, trusted latexmkrc, and a real compile to PDF.');
 await browser.close();
+// The project exists only for this run; its Bangla name checks non-ASCII paths.
+await rm(directory,{recursive:true,force:true});

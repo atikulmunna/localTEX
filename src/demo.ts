@@ -56,5 +56,11 @@ export const demoProject: Project = {
     size: d.text.length,
     editable: true,
   })),
-  config: { version: 1, root: null, engine: null, shellEscape: false },
+  config: {
+    version: 1,
+    root: null,
+    engine: null,
+    shellEscape: false,
+    latexmkrc: false,
+  },
 };

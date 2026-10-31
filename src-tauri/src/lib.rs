@@ -104,6 +104,17 @@ fn shell_trusted(app: &tauri::AppHandle, id: &str) -> bool {
         .ok()
         .is_some_and(|path| path.join("trust").join(format!("{id}.json")).exists())
 }
+fn rc_trusted(app: &tauri::AppHandle, id: &str) -> bool {
+    app_data(app)
+        .ok()
+        .is_some_and(|path| path.join("trust").join(format!("{id}.latexmkrc")).exists())
+}
+/// The rc file latexmk would look for in the project folder, if there is one.
+fn rc_file(root: &std::path::Path) -> Option<&'static str> {
+    ["latexmkrc", ".latexmkrc"]
+        .into_iter()
+        .find(|name| root.join(name).is_file())
+}
 fn internal(root: &std::path::Path) -> Result<PathBuf> {
     let path = root.join(".localtex");
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
@@ -198,6 +209,7 @@ async fn open_project(
             .await
             .map_err(|e| e.to_string())??;
     project.config.shell_escape &= shell_trusted(&app, &project.id);
+    project.config.latexmkrc &= rc_trusted(&app, &project.id);
     *state.project.lock().map_err(|e| e.to_string())? = Some(path.clone());
     *state.last_pdf.lock().map_err(|e| e.to_string())? = None;
     let id = project.id.clone();
@@ -239,6 +251,7 @@ async fn refresh_project(
         .await
         .map_err(|e| e.to_string())??;
     project.config.shell_escape &= shell_trusted(&app, &project.id);
+    project.config.latexmkrc &= rc_trusted(&app, &project.id);
     Ok(project)
 }
 #[tauri::command]
@@ -306,13 +319,18 @@ fn save_project_config(
 ) -> Result<()> {
     let root = root(&state, &project_id)?;
     workspace::validate_config(&root, &config)?;
-    let trust = app_data(&app)?
-        .join("trust")
-        .join(format!("{project_id}.json"));
-    if config.shell_escape {
-        workspace::atomic_write(&trust, b"true")?;
-    } else if trust.exists() {
-        fs::remove_file(trust).map_err(|e| e.to_string())?;
+    // Consent lives in app data, so copying a project's settings cannot grant it elsewhere.
+    let trust = app_data(&app)?.join("trust");
+    for (granted, file) in [
+        (config.shell_escape, format!("{project_id}.json")),
+        (config.latexmkrc, format!("{project_id}.latexmkrc")),
+    ] {
+        let path = trust.join(file);
+        if granted {
+            workspace::atomic_write(&path, b"true")?;
+        } else if path.exists() {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+        }
     }
     workspace::atomic_write(
         &internal(&root)?.join("project.json"),
@@ -518,6 +536,7 @@ async fn test_compilation(
             None,
             false,
             installer,
+            None,
         )?;
         let (success, output) = compiler::output_timeout(cmd, Duration::from_secs(45))?;
         if success && temp.path().join("test.pdf").exists() {
@@ -585,6 +604,11 @@ fn launch_build(
         Some(".localtex/build"),
         config.shell_escape && shell_trusted(&app, &project_id),
         installer,
+        if config.latexmkrc && rc_trusted(&app, &project_id) {
+            rc_file(&root)
+        } else {
+            None
+        },
     )?;
     // -g reruns the engine without deleting auxiliary files or the last good PDF.
     // Retries and package installs must not reuse latexmk's cached failure.

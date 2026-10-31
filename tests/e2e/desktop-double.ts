@@ -4,7 +4,13 @@ import type { Page } from "@playwright/test";
 // These are frontend integration checks; they do not claim native execution.
 export async function installDesktopDouble(
   page: Page,
-  options: { setupComplete?: boolean } = {},
+  options: {
+    setupComplete?: boolean;
+    latexmkrc?: boolean;
+    text?: string;
+    encoding?: string;
+    engine?: string | null;
+  } = {},
 ) {
   await page.addInitScript((options) => {
     const w = window as any;
@@ -14,26 +20,36 @@ export async function installDesktopDouble(
     let next = 1;
     const document = {
       path: "main.tex",
-      text: "\\documentclass{article}\n\\begin{document}Hello\\end{document}",
+      text:
+        options.text ??
+        "\\documentclass{article}\n\\begin{document}Hello\\end{document}",
       revision: "1",
+      encoding: options.encoding ?? "UTF-8",
     };
     const project = {
       id: "test",
       name: "Auto test",
       directory: "D:/Auto test",
       roots: ["main.tex"],
-      files: [{ path: "main.tex", size: 80, editable: true }],
+      files: [
+        ...(options.latexmkrc
+          ? [{ path: "latexmkrc", size: 40, editable: true }]
+          : []),
+        { path: "main.tex", size: 80, editable: true },
+      ],
       config: {
         version: 1,
         root: "main.tex",
-        engine: "pdflatex",
+        engine: options.engine === undefined ? "pdflatex" : options.engine,
         shellEscape: false,
+        latexmkrc: false,
       },
     };
     w.testIPC = {
       calls: [],
       builds: [],
       setups: [],
+      configs: [],
       conflict: false,
       setupStatus: {
         complete: options.setupComplete ?? true,
@@ -90,6 +106,12 @@ export async function installDesktopDouble(
           return next++;
         }
         if (command === "setup_status") return w.testIPC.setupStatus;
+        // The dialog plugin's confirm() asks with a message and returns the clicked label.
+        if (command === "plugin:dialog|message") return "Ok";
+        if (command === "save_project_config") {
+          w.testIPC.configs.push(args.config);
+          return;
+        }
         if (command === "start_setup") {
           w.testIPC.setups.push(args);
           return;
@@ -122,5 +144,6 @@ export const recorded = (page: Page) =>
       calls: t.calls as string[],
       builds: t.builds as Record<string, any>[],
       setups: t.setups as Record<string, any>[],
+      configs: t.configs as Record<string, any>[],
     };
   });

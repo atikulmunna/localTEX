@@ -120,16 +120,67 @@ export function missingFiles(log: string): string[] {
     files.add(`${match[1]}.tfm`);
   return [...files];
 }
+const engines: Engine[] = ["pdflatex", "xelatex", "lualatex"];
+const magicProgram = (text?: string): Engine | null => {
+  const name = text
+    ?.match(/^\s*%\s*!\s*TeX\s+(?:program|TS-program)\s*=\s*(\w+)/im)?.[1]
+    .toLowerCase();
+  return engines.includes(name as Engine) ? (name as Engine) : null;
+};
+const withoutComments = (text: string) =>
+  text
+    .split("\n")
+    .map((line) => line.replace(/(^|[^\\])%.*/, "$1"))
+    .join("\n");
+/** The engine a document needs when nothing names one. Overleaf downloads don't record it. */
+export function detectEngine(text: string): Engine | null {
+  const source = withoutComments(text);
+  // A preamble that branches on the engine works with any of them.
+  if (/\\if(?:xetex|luatex|tutex|pdftex|XeTeX|LuaTeX|PDFTeX)\b/.test(source))
+    return null;
+  const loads = (names: string) =>
+    new RegExp(
+      String.raw`\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{[^}]*\b(?:${names})\b`,
+    ).test(source);
+  if (
+    loads("luacode|luatexja|luamplib|lua-ul|luacolor") ||
+    /\\directlua\b/.test(source)
+  )
+    return "lualatex";
+  if (
+    loads("fontspec|unicode-math|polyglossia|xeCJK|xltxtra|xunicode|mathspec") ||
+    /\\(?:setmainfont|setsansfont|setmonofont|newfontfamily)\b/.test(source)
+  )
+    return "xelatex";
+  return null;
+}
+/** The root's text plus the project files it loads directly, such as a preamble.tex. */
+function rootSource(root: string, documents: DocumentFile[], text?: string) {
+  if (text === undefined) return "";
+  const folder = root.split("/").slice(0, -1);
+  const loaded = [
+    ...withoutComments(text).matchAll(
+      /\\(?:input|include|usepackage|RequirePackage)(?:\[[^\]]*\])?\{([^}]+)\}/g,
+    ),
+  ].flatMap((match) => match[1].split(",").map((name) => name.trim()));
+  const parts = loaded.flatMap((name) =>
+    [name, `${name}.tex`, `${name}.sty`].map((file) =>
+      [...folder, file].join("/"),
+    ),
+  );
+  return [
+    text,
+    ...documents.filter((d) => parts.includes(d.path)).map((d) => d.text),
+  ].join("\n");
+}
 export function resolveBuild(
   project: Project,
   active?: DocumentFile,
+  documents: DocumentFile[] = [],
 ): { root: string | null; engine: Engine } {
   const magicRoot = active?.text
     .match(/^\s*%\s*!\s*TeX\s+root\s*=\s*(.+)$/im)?.[1]
     .trim();
-  const magicEngine = active?.text
-    .match(/^\s*%\s*!\s*TeX\s+(?:program|TS-program)\s*=\s*(\w+)/im)?.[1]
-    .toLowerCase();
   let resolvedMagic: string | null = null;
   if (magicRoot && active) {
     const parts = active.path.split("/").slice(0, -1);
@@ -144,16 +195,26 @@ export function resolveBuild(
     )
       resolvedMagic = candidate;
   }
+  const root =
+    project.config.root ??
+    resolvedMagic ??
+    (project.roots.length === 1 ? project.roots[0] : null);
+  const rootText =
+    root === null
+      ? undefined
+      : active?.path === root
+        ? active.text
+        : documents.find((d) => d.path === root)?.text;
   return {
-    root:
-      project.config.root ??
-      resolvedMagic ??
-      (project.roots.length === 1 ? project.roots[0] : null),
+    root,
     engine:
       project.config.engine ??
-      (["pdflatex", "xelatex", "lualatex"].includes(magicEngine ?? "")
-        ? (magicEngine as Engine)
-        : "pdflatex"),
+      magicProgram(active?.text) ??
+      magicProgram(rootText) ??
+      (root === null
+        ? null
+        : detectEngine(rootSource(root, documents, rootText))) ??
+      "pdflatex",
   };
 }
 export function syncFields(output: string): Record<string, string> {

@@ -203,8 +203,19 @@ export default function App() {
     [documents, query],
   );
   const buildOptions = project
-    ? resolveBuild(project, buffer)
+    ? resolveBuild(project, buffer, currentDocs())
     : { root: null, engine: "pdflatex" as Engine };
+  // What "Auto" would choose, shown beside the engine setting.
+  const autoEngine = project
+    ? resolveBuild(
+        { ...project, config: { ...project.config, engine: null } },
+        buffer,
+        currentDocs(),
+      ).engine
+    : "pdflatex";
+  const rcFile = project?.files.find(
+    (f) => f.path === "latexmkrc" || f.path === ".latexmkrc",
+  )?.path;
   const notify = useCallback(
     (message: unknown) => setNotice(String(message)),
     [],
@@ -580,7 +591,11 @@ export default function App() {
     queued.current = false;
     try {
       if (autoTimer.current) clearTimeout(autoTimer.current);
-      const options = resolveBuild(p, buffers.current.get(activeRef.current));
+      const options = resolveBuild(
+        p,
+        buffers.current.get(activeRef.current),
+        currentDocs(),
+      );
       if (!options.root) {
         setModal("settings");
         notify("Choose a root document in Project settings before compiling.");
@@ -901,6 +916,7 @@ export default function App() {
         path: draft.path,
         text: draft.text,
         revision: disk.revision,
+        encoding: disk.encoding,
         savedText: disk.text,
         ...(draft.revision !== disk.revision ? { conflict: disk } : {}),
       });
@@ -1775,6 +1791,23 @@ export default function App() {
                       <X size={16} />
                     </button>
                   </div>
+                  {buildStatus === "failed" &&
+                    rcFile &&
+                    !project.config.latexmkrc && (
+                      <div className="missing-banner">
+                        <Settings2 size={18} />
+                        <span>
+                          This project has a <strong>{rcFile}</strong> with
+                          build rules localTEX isn’t using yet.
+                        </span>
+                        <button
+                          className="button secondary small"
+                          onClick={() => setModal("settings")}
+                        >
+                          Review in Settings
+                        </button>
+                      </div>
+                    )}
                   {buildStatus === "failed" && missing.length > 0 && (
                     <div className="missing-banner">
                       <Package size={18} />
@@ -1872,7 +1905,9 @@ export default function App() {
             <span>
               Ln {cursor.line}, Col {cursor.column}
             </span>
-            <span>UTF-8</span>
+            <span title="Text encoding of this file">
+              {buffer?.encoding || "UTF-8"}
+            </span>
             <button onClick={() => setModal("settings")} title="LaTeX engine">
               {engineNames[buildOptions.engine]} <ChevronDown size={13} />
             </button>
@@ -2069,7 +2104,7 @@ export default function App() {
                       })
                     }
                   >
-                    <option value="">Auto (default: pdfLaTeX)</option>
+                    <option value="">Auto ({engineNames[autoEngine]})</option>
                     <option value="pdflatex">pdfLaTeX</option>
                     <option value="xelatex">XeLaTeX</option>
                     <option value="lualatex">LuaLaTeX</option>
@@ -2098,6 +2133,32 @@ export default function App() {
                     }}
                   />
                 </label>
+                {rcFile && (
+                  <label className="setting-row">
+                    <div>
+                      <strong>Use this project’s {rcFile}</strong>
+                      <p>
+                        Applies its build rules, for example for a glossary or
+                        nomenclature. A latexmkrc can run any program on your
+                        computer, so turn this on only for projects you trust.
+                      </p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={project.config.latexmkrc}
+                      onChange={(e) => {
+                        if (!e.target.checked)
+                          void saveConfig({ latexmkrc: false });
+                        else
+                          void ask(
+                            `Use ${rcFile} for this trusted project? It can run programs on your computer.`,
+                          ).then((ok) => {
+                            if (ok) void saveConfig({ latexmkrc: true });
+                          });
+                      }}
+                    />
+                  </label>
+                )}
               </section>
             )}
             <section>

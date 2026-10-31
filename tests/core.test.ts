@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  detectEngine,
   diagnostics,
   missingFiles,
   outline,
@@ -47,7 +48,13 @@ const project: Project = {
     { path: "chapters/intro.tex", size: 100, editable: true },
   ],
   roots: ["main.tex"],
-  config: { version: 1, root: null, engine: null, shellEscape: false },
+  config: {
+    version: 1,
+    root: null,
+    engine: null,
+    shellEscape: false,
+    latexmkrc: false,
+  },
 };
 
 test("outline ignores commented commands and preserves line/file locations", () => {
@@ -210,4 +217,53 @@ test("setup progress follows its own run and ignores stale runs", () => {
   view = beginSetup(view, "next");
   assert.equal(view.failure, undefined);
   assert.equal(view.steps.tools.state, "pending");
+});
+test("the engine is detected from what the document loads", () => {
+  assert.equal(detectEngine(String.raw`\usepackage{amsmath,fontspec}`), "xelatex");
+  assert.equal(detectEngine(String.raw`\setmainfont{Times New Roman}`), "xelatex");
+  assert.equal(detectEngine(String.raw`\usepackage[bangla]{polyglossia}`), "xelatex");
+  assert.equal(detectEngine(String.raw`\usepackage{luacode}`), "lualatex");
+  assert.equal(detectEngine(String.raw`\usepackage{luatexja-fontspec}`), "lualatex");
+  assert.equal(detectEngine(String.raw`% \usepackage{fontspec}`), null);
+  assert.equal(detectEngine(String.raw`\usepackage{myfontspecial}`), null);
+  // A preamble that branches on the engine works with any engine.
+  assert.equal(
+    detectEngine(String.raw`\ifxetex\usepackage{fontspec}\else\usepackage[utf8]{inputenc}\fi`),
+    null,
+  );
+});
+test("settings and magic comments win over detection, which follows a separate preamble", () => {
+  const overleaf: Project = {
+    ...project,
+    roots: ["main.tex"],
+    files: [
+      { path: "main.tex", size: 1, editable: true },
+      { path: "preamble.tex", size: 1, editable: true },
+      { path: "chapter.tex", size: 1, editable: true },
+    ],
+  };
+  const files = (main: string): DocumentFile[] => [
+    { path: "main.tex", revision: "a", text: main },
+    { path: "preamble.tex", revision: "b", text: String.raw`\usepackage{fontspec}` },
+    { path: "chapter.tex", revision: "c", text: "Text" },
+  ];
+  const main = String.raw`\documentclass{article}\input{preamble}`;
+  const chapter = files(main)[2];
+  assert.equal(resolveBuild(overleaf, chapter, files(main)).engine, "xelatex");
+  assert.equal(
+    resolveBuild(overleaf, chapter, files("% !TeX program = lualatex\n" + main)).engine,
+    "lualatex",
+  );
+  assert.equal(
+    resolveBuild(
+      { ...overleaf, config: { ...overleaf.config, engine: "pdflatex" } },
+      chapter,
+      files(main),
+    ).engine,
+    "pdflatex",
+  );
+  assert.equal(
+    resolveBuild(overleaf, chapter, files(String.raw`\documentclass{article}`)).engine,
+    "pdflatex",
+  );
 });

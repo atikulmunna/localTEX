@@ -72,20 +72,23 @@ The app contains no TeX distribution. A fresh installation guides the user to in
 
 Configuration lives in `.localtex/project.json`; build artifacts live in `.localtex/build/`. The internal `.gitignore` excludes build artifacts. Project configuration has version `1`, optional `root` and `engine`, and a `shellEscape` flag. Shell escape additionally requires local consent recorded in app data, so copying a project configuration cannot grant it on another machine.
 
-`latexmk` runs with `-norc`: arbitrary `.latexmkrc` scripts are not loaded. Engine commands are restricted to pdfLaTeX, XeLaTeX, and LuaLaTeX. MiKTeX engine invocations disable automatic package installation unless you choose **Install and compile** or turn on automatic installs. The external TeX distribution remains responsible for its helper programs and configuration. Shell escape explicitly grants external-program execution.
+`latexmk` runs with `-norc`, so system, user, and project rc files are not loaded. The one exception is a project's own `latexmkrc` after you trust it in Settings; even then only that file is read, and localTEX's output folder and safety options still apply. Engine commands are restricted to pdfLaTeX, XeLaTeX, and LuaLaTeX. MiKTeX engine invocations disable automatic package installation unless you choose **Install and compile** or turn on automatic installs. The external TeX distribution remains responsible for its helper programs and configuration. Shell escape explicitly grants external-program execution.
 
 ### Working alongside other editors
 
 A localTEX project is an ordinary folder, so the same folder opens in TeXstudio, VS Code, TeXworks, or Overleaf (zip it and upload). localTEX adds only a hidden `.localtex` folder for its settings and build output, which other editors ignore.
 
 - Saving keeps each file's own line endings (Windows CRLF or Unix LF) and its UTF-8 byte-order mark, so files edited elsewhere don't show every line as changed in git.
-- `% !TeX root` and `% !TeX program` magic comments work as in TeXstudio and VS Code.
+- `% !TeX root` and `% !TeX program` magic comments work as in TeXstudio and VS Code, whether they are in the open file or the main document.
+- **Engine detection.** Overleaf downloads don't record the engine. When neither Settings nor a magic comment names one, localTEX uses XeLaTeX for documents that load `fontspec`, `unicode-math`, `polyglossia` or set fonts with `\setmainfont`, and LuaLaTeX for `luacode`, `luatexja` or `\directlua`. It reads the main document and the files it loads directly (such as `preamble.tex`). A preamble that branches on the engine (`\ifxetex` and similar) stays on pdfLaTeX. Settings shows the choice as "Auto (XeLaTeX)".
+- **Older encodings.** Files that aren't UTF-8 open as Windows-1252, the `latin1` / `ansinew` encoding of older Windows projects, and the status bar shows it. Saving keeps that encoding byte for byte. A character the encoding can't store (for example Bangla text) is refused with a message instead of being written in a mixed encoding.
+- **`latexmkrc`.** Projects that build with custom latexmk rules (glossaries, nomenclature) can use them: Settings → Project → **Use this project's latexmkrc**. Because an rc file can run any program, localTEX asks first and records your consent on this PC only; a copied project cannot grant it. After a failed build, a project with an unused `latexmkrc` shows a reminder.
 - Build files other editors leave beside the source (`.aux`, `.log`, `.synctex.gz`, `.fdb_latexmk`, `.bbl` and similar), hidden folders such as `.vscode`, and `_minted` caches are left out of the file list.
 - Besides `.tex` and `.bib`, the editor opens `.sty`, `.cls`, `.clo`, `.cfg`, `.def`, `.fd`, `.dtx`, `.ins`, `.bst`, `.bbx`, `.cbx`, `.lbx`, `.dbx`, `.ist`, `.tikz`, `.pgf`, `.lua`, `.ltx`, `latexmkrc`, `.txt`, `.md`, `.csv`, `.json`, and `.yaml` files.
 - The PDF is written to `.localtex/build/`, not beside `main.tex`; use Export for a copy elsewhere.
-- Not yet supported: files in encodings other than UTF-8 (convert them first), and projects that depend on a `latexmkrc` to build. Overleaf downloads don't record the engine; set it in Settings or add `% !TeX program = xelatex`.
+- Encodings other than UTF-8 and Windows-1252 (for example Latin-2 or Cyrillic code pages) are read as Windows-1252, so some characters display wrongly; saving still keeps every byte as it was. Convert such files to UTF-8 to edit them comfortably.
 
-V1 opens UTF-8 source files up to 8 MB, indexes up to 32 MB of project text, and lists up to 20,000 files. Source paths must stay within the project. File creation supports paths in existing directories. Rename does not rewrite `\input`, bibliography, or image references. Projects with custom build scripts or legacy source encodings may require adaptation.
+V1 opens source files up to 8 MB, indexes up to 32 MB of project text, and lists up to 20,000 files. Source paths must stay within the project. File creation supports paths in existing directories. Rename does not rewrite `\input`, bibliography, or image references. Projects with custom build scripts or legacy source encodings may require adaptation.
 
 ## Tests
 
