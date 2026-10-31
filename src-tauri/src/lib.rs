@@ -311,6 +311,47 @@ fn rename_file(
     fs::rename(from, to).map_err(|e| e.to_string())
 }
 #[tauri::command]
+fn create_folder(state: State<'_, AppState>, project_id: String, path: String) -> Result<()> {
+    workspace::create_folder(&root(&state, &project_id)?, &path)
+}
+#[tauri::command]
+async fn delete_entry(state: State<'_, AppState>, project_id: String, path: String) -> Result<()> {
+    let root = root(&state, &project_id)?;
+    tauri::async_runtime::spawn_blocking(move || workspace::remove(&root, &path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn import_files(
+    state: State<'_, AppState>,
+    project_id: String,
+    folder: String,
+    sources: Vec<String>,
+) -> Result<Vec<String>> {
+    let root = root(&state, &project_id)?;
+    tauri::async_runtime::spawn_blocking(move || workspace::import(&root, &folder, &sources))
+        .await
+        .map_err(|e| e.to_string())?
+}
+/// Raw bytes of a project file such as an image, for previewing it.
+#[tauri::command]
+async fn read_binary(
+    state: State<'_, AppState>,
+    project_id: String,
+    path: String,
+) -> Result<tauri::ipc::Response> {
+    let path = workspace::safe_path(&root(&state, &project_id)?, &path, true)?;
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        if fs::metadata(&path).map_err(|e| e.to_string())?.len() > 50 * 1024 * 1024 {
+            return Err("Files larger than 50 MB are not previewed.".to_string());
+        }
+        fs::read(path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+#[tauri::command]
 fn save_project_config(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -907,6 +948,10 @@ pub fn run() {
             save_file,
             create_file,
             rename_file,
+            create_folder,
+            delete_entry,
+            import_files,
+            read_binary,
             save_project_config,
             create_project,
             save_draft,

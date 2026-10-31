@@ -17,6 +17,12 @@ export function Modal({
   useEffect(() => {
     const node = ref.current;
     node?.showModal();
+    // showModal() moves focus to the close button; a form should start in its first field.
+    node
+      ?.querySelector<HTMLElement>(
+        "form :is(input:not([type=checkbox]), select, textarea), .command-search input",
+      )
+      ?.focus();
     return () => node?.close();
   }, []);
   return (

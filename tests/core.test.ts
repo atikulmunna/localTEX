@@ -1,9 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  countWords,
   detectEngine,
   diagnostics,
+  foldEnd,
   missingFiles,
+  nonProse,
   outline,
   projectSymbols,
   relativeSource,
@@ -48,6 +51,7 @@ const project: Project = {
     { path: "chapters/intro.tex", size: 100, editable: true },
   ],
   roots: ["main.tex"],
+  folders: [],
   config: {
     version: 1,
     root: null,
@@ -266,4 +270,58 @@ test("settings and magic comments win over detection, which follows a separate p
     resolveBuild(overleaf, chapter, files(String.raw`\documentclass{article}`)).engine,
     "pdflatex",
   );
+});
+test("spell checking and word counts skip commands, math, names and comments", () => {
+  const text = String.raw`See \textbf{teh} result in \cref{fig:plot} and \citep[p.~2]{knuth1984}, where $x^2$ grows. % notte
+\begin{equation}
+  E = mc^2
+\end{equation}`;
+  const skipped = nonProse(text).map(([from, to]) => text.slice(from, to));
+  assert.ok(skipped.includes("\\textbf"));
+  assert.ok(skipped.includes("\\cref{fig:plot}"));
+  assert.ok(skipped.includes("\\citep[p.~2]{knuth1984}"));
+  assert.ok(skipped.includes("$x^2$"));
+  assert.ok(skipped.includes("% notte"));
+  assert.ok(skipped.some((part) => part.startsWith("\\begin{equation}") && part.endsWith("\\end{equation}")));
+  // Prose inside formatting stays checkable.
+  assert.ok(!skipped.some((part) => part.includes("teh")));
+});
+test("word count follows included files and keeps Bangla words whole", () => {
+  const docs: DocumentFile[] = [
+    {
+      path: "main.tex",
+      revision: "a",
+      text: String.raw`\documentclass{article}
+\usepackage{graphicx} preamble words are not counted
+\begin{document}
+Hello \emph{bright} world, see \ref{sec:a} and $a+b$.
+\input{chapters/intro}
+% \input{chapters/skipped}
+\end{document}`,
+    },
+    { path: "chapters/intro.tex", revision: "b", text: "আমার সোনার বাংলা, a well-known song." },
+    { path: "chapters/skipped.tex", revision: "c", text: "Not part of the document." },
+  ];
+  // Hello, bright, world, see, and; then আমার, সোনার, বাংলা, a, well-known, song.
+  assert.equal(countWords("main.tex", docs), 11);
+  assert.equal(countWords(null, docs), 0);
+});
+test("folds reach the matching end or the next heading at the same level", () => {
+  const lines = String.raw`\section{One}
+Intro text.
+\subsection{Detail}
+\begin{figure}
+  \begin{figure}
+  \end{figure}
+\end{figure}
+
+\section{Two}
+Last.
+\end{document}`.split("\n");
+  const line = (n: number) => lines[n - 1];
+  assert.deepEqual(foldEnd(line, lines.length, 1), { line: 7, column: 12 });
+  assert.deepEqual(foldEnd(line, lines.length, 3), { line: 7, column: 12 });
+  assert.deepEqual(foldEnd(line, lines.length, 4), { line: 7, column: 0 });
+  assert.deepEqual(foldEnd(line, lines.length, 9), { line: 10, column: 5 });
+  assert.equal(foldEnd(line, lines.length, 2), null);
 });

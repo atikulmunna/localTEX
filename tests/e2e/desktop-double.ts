@@ -31,7 +31,9 @@ export async function installDesktopDouble(
       name: "Auto test",
       directory: "D:/Auto test",
       roots: ["main.tex"],
+      folders: ["figures"],
       files: [
+        { path: "figures/plot.png", size: 68, editable: false },
         ...(options.latexmkrc
           ? [{ path: "latexmkrc", size: 40, editable: true }]
           : []),
@@ -50,6 +52,7 @@ export async function installDesktopDouble(
       builds: [],
       setups: [],
       configs: [],
+      fileOps: [],
       conflict: false,
       setupStatus: {
         complete: options.setupComplete ?? true,
@@ -131,6 +134,22 @@ export async function installDesktopDouble(
         }
         if (command === "start_build")
           w.testIPC.builds.push({ ...args, text: document.text });
+        if (
+          ["create_folder", "delete_entry", "import_files"].includes(command)
+        ) {
+          w.testIPC.fileOps.push({ command, ...args });
+          return command === "import_files"
+            ? args.sources.map((s: string) => `${args.folder}/${s.split("/").at(-1)}`)
+            : undefined;
+        }
+        if (command === "plugin:dialog|open") return ["C:/Pictures/chart.png"];
+        if (command === "read_binary") {
+          // A real 1 x 1 PNG, so the preview's <img> can load it.
+          const png = atob(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+          );
+          return Uint8Array.from(png, (c) => c.charCodeAt(0)).buffer;
+        }
       },
     };
   }, options);
@@ -145,5 +164,6 @@ export const recorded = (page: Page) =>
       builds: t.builds as Record<string, any>[],
       setups: t.setups as Record<string, any>[],
       configs: t.configs as Record<string, any>[],
+      fileOps: t.fileOps as Record<string, any>[],
     };
   });

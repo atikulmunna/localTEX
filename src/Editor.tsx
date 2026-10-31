@@ -1,13 +1,25 @@
 import { useEffect, useRef } from "react";
-import { EditorState, Compartment } from "@codemirror/state";
 import {
+  EditorState,
+  Compartment,
+  EditorSelection,
+  Prec,
+  RangeSetBuilder,
+} from "@codemirror/state";
+import {
+  Decoration,
   EditorView,
+  ViewPlugin,
+  crosshairCursor,
   keymap,
   lineNumbers,
   highlightActiveLine,
   highlightActiveLineGutter,
   drawSelection,
   rectangularSelection,
+  type Command,
+  type DecorationSet,
+  type ViewUpdate,
 } from "@codemirror/view";
 import {
   defaultKeymap,
@@ -18,6 +30,9 @@ import {
 import {
   StreamLanguage,
   bracketMatching,
+  foldGutter,
+  foldKeymap,
+  foldService,
   indentOnInput,
   syntaxHighlighting,
   HighlightStyle,
@@ -35,13 +50,107 @@ import {
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import { lintGutter, setDiagnostics } from "@codemirror/lint";
 import type { Diagnostic, DocumentFile } from "./types";
-import { projectSymbols } from "./core";
+import { foldEnd, nonProse, projectSymbols } from "./core";
 
 const states = new Map<string, EditorState>();
 const scrollPositions = new Map<string, number>();
 // Compartments must have stable identity across editor unmounts and restored states.
 const completion = new Compartment();
 const updates = new Compartment();
+const spelling = new Compartment();
+
+const latexFolding = foldService.of((state, from) => {
+  const start = state.doc.lineAt(from);
+  const end = foldEnd(
+    (n) => state.doc.line(n).text,
+    state.doc.lines,
+    start.number,
+  );
+  return end ? { from: start.to, to: state.doc.line(end.line).from + end.column } : null;
+});
+
+/** Ctrl+B and Ctrl+I, as in Overleaf: wrap each selection, or unwrap it if already wrapped. */
+function wrapWith(command: string): Command {
+  const open = `\\${command}{`;
+  return (view) => {
+    const { state } = view;
+    view.dispatch(
+      state.changeByRange((range) => {
+        const wrapped =
+          state.sliceDoc(range.from - open.length, range.from) === open &&
+          state.sliceDoc(range.to, range.to + 1) === "}";
+        return wrapped
+          ? {
+              changes: [
+                { from: range.from - open.length, to: range.from },
+                { from: range.to, to: range.to + 1 },
+              ],
+              range: EditorSelection.range(
+                range.from - open.length,
+                range.to - open.length,
+              ),
+            }
+          : {
+              changes: [
+                { from: range.from, insert: open },
+                { from: range.to, insert: "}" },
+              ],
+              range: EditorSelection.range(
+                range.from + open.length,
+                range.to + open.length,
+              ),
+            };
+      }),
+      { scrollIntoView: true, userEvent: "input" },
+    );
+    return true;
+  };
+}
+
+// The system spell checker (Windows, through WebView2) checks the editor's text. LaTeX
+// commands, math, labels and paths are marked so it underlines only prose.
+const notProse = Decoration.mark({ attributes: { spellcheck: "false" } });
+// Very large files are scanned around the visible lines only, to keep typing fast.
+const wholeScanLimit = 1_000_000;
+function scan(view: EditorView): [number, number][] {
+  const { doc } = view.state;
+  if (doc.length <= wholeScanLimit) return nonProse(doc.toString());
+  return view.visibleRanges.flatMap(({ from, to }) => {
+    const start = doc.lineAt(from).from;
+    return nonProse(doc.sliceString(start, doc.lineAt(to).to)).map(
+      ([a, b]): [number, number] => [start + a, start + b],
+    );
+  });
+}
+function proseMarks(view: EditorView, ranges: [number, number][]) {
+  const builder = new RangeSetBuilder<Decoration>();
+  const visible = view.visibleRanges;
+  for (const [from, to] of ranges)
+    if (visible.some((range) => from < range.to && to > range.from))
+      builder.add(from, to, notProse);
+  return builder.finish();
+}
+const spellChecking = [
+  EditorView.contentAttributes.of({ spellcheck: "true" }),
+  ViewPlugin.fromClass(
+    class {
+      ranges: [number, number][];
+      decorations: DecorationSet;
+      constructor(view: EditorView) {
+        this.ranges = scan(view);
+        this.decorations = proseMarks(view, this.ranges);
+      }
+      update(update: ViewUpdate) {
+        const large = update.state.doc.length > wholeScanLimit;
+        if (update.docChanged || (large && update.viewportChanged))
+          this.ranges = scan(update.view);
+        if (update.docChanged || update.viewportChanged)
+          this.decorations = proseMarks(update.view, this.ranges);
+      }
+    },
+    { decorations: (plugin) => plugin.decorations },
+  ),
+];
 const latexHighlights=HighlightStyle.define([
   {tag:[tags.tagName,tags.keyword,tags.function(tags.variableName)],color:'var(--syntax-command)'},
   {tag:[tags.atom,tags.number,tags.string,tags.special(tags.variableName)],color:'var(--syntax-value)'},
@@ -160,6 +269,20 @@ const theme = EditorView.theme({
     fontWeight: "600",
   },
   ".cm-cursor, .cm-dropCursor": { borderLeftWidth: "2px" },
+  ".cm-foldGutter .cm-gutterElement": {
+    color: "var(--muted)",
+    cursor: "pointer",
+    padding: "0 3px",
+  },
+  ".cm-foldGutter .cm-gutterElement:hover": { color: "var(--accent)" },
+  ".cm-foldPlaceholder": {
+    backgroundColor: "var(--accent-soft)",
+    border: "none",
+    borderRadius: "5px",
+    color: "var(--accent-text)",
+    padding: "0 7px",
+    margin: "0 4px",
+  },
   ".cm-activeLine": { backgroundColor: "var(--active-line)" },
   "&.cm-focused": { outline: "none" },
   "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection":
@@ -193,6 +316,7 @@ interface Props {
   initialText: string;
   documents: DocumentFile[];
   diagnostics: Diagnostic[];
+  spellcheck: boolean;
   onChange: (text: string) => void;
   onCursor: (line: number, column: number) => void;
   onReady: (view: EditorView | null) => void;
@@ -202,6 +326,7 @@ export function Editor({
   initialText,
   documents,
   diagnostics,
+  spellcheck,
   onChange,
   onCursor,
   onReady,
@@ -219,13 +344,18 @@ export function Editor({
       doc: initialText,
       extensions: [
         lineNumbers(),
+        foldGutter(),
         lintGutter(),
         history(),
         drawSelection(),
+        // Ctrl+click adds a cursor, Alt+drag selects a column, Ctrl+D adds the next match.
+        EditorState.allowMultipleSelections.of(true),
         rectangularSelection(),
+        crosshairCursor(),
         highlightActiveLine(),
         highlightActiveLineGutter(),
         StreamLanguage.define(stex),
+        latexFolding,
         syntaxHighlighting(latexHighlights),
         indentOnInput(),
         bracketMatching(),
@@ -235,14 +365,25 @@ export function Editor({
         theme,
         EditorView.contentAttributes.of({
           "aria-label": "LaTeX source editor",
-          spellcheck: "false",
         }),
+        spelling.of(
+          spellcheck
+            ? spellChecking
+            : EditorView.contentAttributes.of({ spellcheck: "false" }),
+        ),
+        Prec.high(
+          keymap.of([
+            { key: "Mod-b", run: wrapWith("textbf") },
+            { key: "Mod-i", run: wrapWith("textit") },
+          ]),
+        ),
         keymap.of([
           ...closeBracketsKeymap,
           ...defaultKeymap,
           ...historyKeymap,
           ...searchKeymap,
           ...completionKeymap,
+          ...foldKeymap,
           indentWithTab,
         ]),
         completion.of(
@@ -286,6 +427,15 @@ export function Editor({
       ),
     });
   }, [documents, bufferKey]);
+  useEffect(() => {
+    view.current?.dispatch({
+      effects: spelling.reconfigure(
+        spellcheck
+          ? spellChecking
+          : EditorView.contentAttributes.of({ spellcheck: "false" }),
+      ),
+    });
+  }, [spellcheck, bufferKey]);
   useEffect(()=>{
     const instance=view.current;if(!instance)return;
     instance.dispatch(setDiagnostics(instance.state, diagnostics.filter(d=>d.line&&d.line<=instance.state.doc.lines).map(d=>{

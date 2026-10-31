@@ -246,3 +246,139 @@ export function relativeSource(
     return normalized.replace(/^\.\//, "");
   return null;
 }
+
+// Commands whose first argument is a name, key, path or setting rather than prose.
+const nameArguments =
+  "label|ref|eqref|pageref|autoref|cref|Cref|nameref|cite\\w*|nocite|begin|end|usepackage|RequirePackage|documentclass|input|include|includeonly|includegraphics|subfile|bibliography|bibliographystyle|addbibresource|graphicspath|url|href|hypersetup|newcommand|renewcommand|providecommand|newenvironment|renewenvironment|DeclareMathOperator|setlength|addtolength|setcounter|addtocounter|definecolor|color|textcolor|colorbox|pagestyle|thispagestyle|pagenumbering|lstinputlisting|inputminted|lstset|geometry|vspace|hspace";
+const mathEnvironments =
+  "equation|align|alignat|flalign|gather|multline|eqnarray|math|displaymath";
+const codeEnvironments = "verbatim|lstlisting|minted|comment";
+const nonProsePatterns = [
+  /(^|[^\\])%.*/g,
+  new RegExp(String.raw`\\begin\{(${mathEnvironments}|${codeEnvironments})\*?\}[\s\S]*?\\end\{\1\*?\}`, "g"),
+  /\$\$[\s\S]*?\$\$/g,
+  /\\\[[\s\S]*?\\\]/g,
+  /\\\([\s\S]*?\\\)/g,
+  /\$(?:\\.|[^$\\\n])+\$/g,
+  // The lookahead stops \include from matching only the start of \includegraphics.
+  new RegExp(String.raw`\\(?:${nameArguments})(?![a-zA-Z@])\*?(?:\s*\[[^\]\n]*\])*(?:\s*\{[^{}\n]*\})?`, "g"),
+  /\\[a-zA-Z@]+\*?|\\./g,
+];
+/**
+ * Ranges of LaTeX source that are not prose: commands, math, code, comments, and names
+ * such as labels or file paths. Spell checking and the word count skip them.
+ */
+export function nonProse(text: string): [number, number][] {
+  const ranges: [number, number][] = [];
+  for (const pattern of nonProsePatterns)
+    for (const match of text.matchAll(pattern)) {
+      // A comment match may begin with the character before the %.
+      const skip = pattern === nonProsePatterns[0] ? match[1].length : 0;
+      ranges.push([match.index + skip, match.index + match[0].length]);
+    }
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged: [number, number][] = [];
+  for (const range of ranges) {
+    const last = merged.at(-1);
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+    else merged.push([...range]);
+  }
+  return merged;
+}
+// Letters with their combining marks, so Bangla and other Indic words stay whole.
+const word = /[\p{L}\p{M}\p{N}]+(?:[-'’][\p{L}\p{M}\p{N}]+)*/gu;
+function proseWords(text: string) {
+  let prose = "";
+  let last = 0;
+  for (const [from, to] of nonProse(text)) {
+    prose += text.slice(last, from) + " ";
+    last = to;
+  }
+  prose += text.slice(last);
+  return prose.match(word)?.length ?? 0;
+}
+/**
+ * Words in the document text, following \input and \include from the root. The preamble,
+ * commands, math, and comments are left out, as texcount does.
+ */
+export function countWords(root: string | null, documents: DocumentFile[]) {
+  if (!root) return 0;
+  const texts = new Map(documents.map((d) => [d.path, d.text]));
+  // LaTeX resolves \input paths from the root's folder, whichever file contains them.
+  const folder = root.split("/").slice(0, -1);
+  const seen = new Set<string>();
+  const visit = (path: string, isRoot: boolean): number => {
+    let text = texts.get(path);
+    if (text === undefined || seen.has(path)) return 0;
+    seen.add(path);
+    if (isRoot) {
+      const start = text.indexOf("\\begin{document}");
+      const end = text.indexOf("\\end{document}");
+      if (start >= 0)
+        text = text.slice(start + "\\begin{document}".length, end > start ? end : undefined);
+    }
+    let total = proseWords(text);
+    for (const match of withoutComments(text).matchAll(
+      /\\(?:input|include|subfile)\{([^}]+)\}/g,
+    )) {
+      const name = [...folder, match[1].trim()].join("/").replace(/^\.\//, "");
+      total += texts.has(name) ? visit(name, false) : visit(`${name}.tex`, false);
+    }
+    return total;
+  };
+  return visit(root, true);
+}
+const sectionLevels: Record<string, number> = {
+  part: 0,
+  chapter: 1,
+  section: 2,
+  subsection: 3,
+  subsubsection: 4,
+  paragraph: 5,
+  subparagraph: 6,
+};
+const headingLine =
+  /^\s*\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?\s*[[{]/;
+/**
+ * Where a fold that starts on `start` ends: the line before the next heading of the same
+ * or a higher level, or the matching \end of an environment. Line numbers start at 1;
+ * `column` is where the folded text stops on the end line.
+ */
+export function foldEnd(
+  line: (n: number) => string,
+  total: number,
+  start: number,
+): { line: number; column: number } | null {
+  const limit = Math.min(total, start + 5000);
+  const first = line(start);
+  const heading = first.match(headingLine);
+  if (heading) {
+    const level = sectionLevels[heading[1]];
+    let end = start;
+    for (let n = start + 1; n <= limit; n++) {
+      const text = line(n);
+      const next = text.match(headingLine);
+      if (
+        (next && sectionLevels[next[1]] <= level) ||
+        /^\s*\\(?:end\{document\}|appendix\b|printbibliography\b|bibliography\{)/.test(text)
+      )
+        break;
+      end = n;
+    }
+    while (end > start && !line(end).trim()) end--;
+    return end > start ? { line: end, column: line(end).length } : null;
+  }
+  const begin = first.match(/\\begin\{([^}]+)\}/);
+  if (!begin) return null;
+  let depth = 0;
+  for (let n = start; n <= limit; n++) {
+    const text = n === start ? first.slice(begin.index) : line(n);
+    for (const match of text.matchAll(/\\(begin|end)\{([^}]+)\}/g)) {
+      if (match[2] !== begin[1]) continue;
+      depth += match[1] === "begin" ? 1 : -1;
+      if (depth === 0)
+        return n > start ? { line: n, column: match.index } : null;
+    }
+  }
+  return null;
+}

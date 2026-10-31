@@ -882,44 +882,95 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.file-row {
+.sidebar-heading .project-root {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  padding: 4px 6px;
+  margin-left: -6px;
+  border-radius: 6px;
+  font-weight: 600;
+}
+.sidebar-heading .project-root:hover {
+  background: var(--hover);
+}
+.heading-actions {
+  display: flex;
+  flex-shrink: 0;
+}
+.heading-actions .icon-button {
+  width: 32px;
+  height: 32px;
+}
+.tree-row {
   display: flex;
   align-items: center;
   border-radius: 8px;
-  margin-bottom: 2px;
+  margin-bottom: 1px;
+  padding-left: calc(var(--depth, 0) * 16px);
   color: var(--secondary);
 }
-.file-row:hover {
+.tree-row:hover {
   background: var(--hover);
 }
-.file-row.active {
+.tree-row.active {
   background: var(--accent-soft);
   color: var(--accent-text);
 }
-.file-open {
+.tree-row.folder {
+  color: var(--text);
+}
+.tree-row.folder.selected {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.tree-open {
   flex: 1;
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   text-align: left;
-  padding: 8px 10px;
+  padding: 7px 8px;
   border-radius: 8px;
   font-size: var(--fs-ui);
 }
-.file-row.active .file-open {
+.tree-row.active .tree-open {
   font-weight: 600;
+}
+.tree-open > svg:first-child {
+  color: var(--muted);
+}
+.tree-icon {
+  flex-shrink: 0;
+  color: var(--secondary);
+}
+.folder-icon {
+  color: var(--accent);
+}
+.tree-open .dirty-dot {
+  margin-left: auto;
+}
+.row-actions {
+  display: flex;
+  margin-right: 2px;
+  opacity: 0;
+}
+.tree-row:hover .row-actions,
+.tree-row:focus-within .row-actions,
+.tree-row.active .row-actions {
+  opacity: 1;
+}
+.row-actions .icon-button {
+  width: 28px;
+  height: 28px;
+  color: inherit;
 }
 .file-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.file-action {
-  width: 30px;
-  height: 30px;
-  margin-right: 3px;
-  color: inherit;
 }
 .file-glyph {
   font-family: "Newsreader", serif;
@@ -942,9 +993,6 @@ kbd {
   background: var(--accent);
   border-radius: 50%;
   flex-shrink: 0;
-}
-.file-open .dirty-dot {
-  margin-left: auto;
 }
 .outline-row {
   display: flex;
@@ -1240,12 +1288,14 @@ kbd {
   flex: 1;
   overflow: auto;
   min-height: 0;
-  padding: 28px 24px;
+  padding: 24px;
   scrollbar-width: thin;
   position: relative;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  /* "safe" keeps a zoomed page's left edge reachable instead of clipping it. */
+  align-items: safe center;
+  gap: 16px;
 }
 .pdf-page {
   position: relative;
@@ -1396,6 +1446,45 @@ kbd {
   max-width: 360px;
 }
 
+.image-preview {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: safe center;
+  justify-content: safe center;
+  padding: 28px;
+  /* A checkerboard shows where an image is transparent. */
+  background: repeating-conic-gradient(var(--hover) 0 25%, var(--editor) 0 50%) 0 0 / 20px 20px;
+}
+.image-preview img {
+  max-width: 100%;
+  box-shadow: 0 8px 28px #00000024;
+}
+.editor-pane .pdf-pane {
+  min-width: 0;
+}
+.drop-overlay {
+  position: fixed;
+  inset: 12px;
+  z-index: 10001;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 2px dashed var(--accent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--accent-soft) 88%, transparent);
+  color: var(--accent-text);
+  font-size: var(--fs-body);
+  pointer-events: none;
+}
+.drop-overlay strong {
+  font-size: 18px;
+  font-weight: 600;
+}
+
 /* Status bar */
 .statusbar {
   height: 32px;
@@ -1435,6 +1524,9 @@ kbd {
 }
 .status-spacer {
   flex: 1;
+}
+.status-words {
+  font-variant-numeric: tabular-nums;
 }
 .status-saved {
   color: var(--muted);

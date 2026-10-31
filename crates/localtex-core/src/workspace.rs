@@ -44,6 +44,7 @@ pub struct Project {
     pub files: Vec<Entry>,
     pub config: ProjectConfig,
     pub roots: Vec<String>,
+    pub folders: Vec<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -242,8 +243,14 @@ pub fn inspect(root: &Path) -> Result<Project> {
                 e.file_type().is_dir() && (name.starts_with('.') || name.starts_with("_minted"));
             e.depth() == 0 || !(hidden_folder || matches!(name, "node_modules" | "target"))
         });
+    let mut folders = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
+        // Folders are listed too, so a new empty folder appears in the file tree.
+        if entry.file_type().is_dir() && entry.depth() > 0 {
+            folders.push(relative(root, entry.path()));
+            continue;
+        }
         if !entry.file_type().is_file() || build_output(&entry.file_name().to_string_lossy()) {
             continue;
         }
@@ -274,6 +281,7 @@ pub fn inspect(root: &Path) -> Result<Project> {
         });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
+    folders.sort();
     roots.sort();
     let config_path = root.join(".localtex/project.json");
     let config = if config_path.exists() {
@@ -295,9 +303,60 @@ pub fn inspect(root: &Path) -> Result<Project> {
             .into_owned(),
         directory,
         files,
+        folders,
         config,
         roots,
     })
+}
+pub fn create_folder(root: &Path, name: &str) -> Result<()> {
+    let path = safe_path(root, name, false)?;
+    fs::create_dir(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => {
+            "A file or folder with this name already exists.".to_string()
+        }
+        _ => e.to_string(),
+    })
+}
+/// Moves a project file or folder to the Recycle Bin.
+pub fn remove(root: &Path, name: &str) -> Result<()> {
+    let path = safe_path(root, name, true)?;
+    crate::paths::recycle(&path).map_err(|e| e.to_string())
+}
+/// Copies files from elsewhere (a file dialog or Explorer) into `folder`, which is "" for
+/// the project root. A name already in use gets a number, so nothing is overwritten.
+pub fn import(root: &Path, folder: &str, sources: &[String]) -> Result<Vec<String>> {
+    let target = if folder.is_empty() {
+        root.to_path_buf()
+    } else {
+        safe_path(root, folder, true)?
+    };
+    if !target.is_dir() {
+        return Err("Choose a folder in this project.".into());
+    }
+    let mut added = Vec::new();
+    for source in sources.iter().map(Path::new) {
+        if !source.is_file() {
+            return Err(format!(
+                "{} is a folder. Add the files inside it instead.",
+                source.display()
+            ));
+        }
+        let stem = source.file_stem().unwrap_or_default().to_string_lossy();
+        let extension = source
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default();
+        let mut destination = target.join(format!("{stem}{extension}"));
+        for n in 2.. {
+            if !destination.exists() {
+                break;
+            }
+            destination = target.join(format!("{stem} ({n}){extension}"));
+        }
+        fs::copy(source, &destination).map_err(|e| e.to_string())?;
+        added.push(relative(root, &destination));
+    }
+    Ok(added)
 }
 pub fn validate_config(root: &Path, config: &ProjectConfig) -> Result<()> {
     if config.version != 1 {
@@ -457,6 +516,43 @@ mod tests {
             "{error}"
         );
         assert_eq!(fs::read(root.join("main.tex")).unwrap(), expected);
+    }
+    #[test]
+    fn folders_are_listed_created_and_filled_without_overwriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        create_folder(&root, "figures").unwrap();
+        create_folder(&root, "figures/plots").unwrap();
+        assert!(create_folder(&root, "figures")
+            .unwrap_err()
+            .contains("already exists"));
+        assert!(create_folder(&root, "../outside").is_err());
+        let outside = tempfile::tempdir().unwrap();
+        let image = outside.path().join("plot.png");
+        fs::write(&image, b"png").unwrap();
+        let sources = [image.to_string_lossy().into_owned()];
+        assert_eq!(
+            import(&root, "figures", &sources).unwrap(),
+            ["figures/plot.png"]
+        );
+        assert_eq!(
+            import(&root, "figures", &sources).unwrap(),
+            ["figures/plot (2).png"]
+        );
+        assert!(import(&root, "", &[outside.path().to_string_lossy().into_owned()]).is_err());
+        let project = inspect(&root).unwrap();
+        assert_eq!(project.folders, ["figures", "figures/plots"]);
+        assert_eq!(project.files.len(), 2);
+    }
+    #[test]
+    #[ignore = "Moves a file to the real Recycle Bin"]
+    fn removing_moves_to_the_recycle_bin() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::write(root.join("localtex recycle check.tex"), "x").unwrap();
+        remove(&root, "localtex recycle check.tex").unwrap();
+        assert!(!root.join("localtex recycle check.tex").exists());
+        assert!(remove(&root, "missing.tex").is_err());
     }
     #[test]
     fn discovers_roots_and_ignores_build_outputs() {

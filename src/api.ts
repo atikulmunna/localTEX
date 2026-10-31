@@ -28,6 +28,14 @@ export const api = {
     invoke<void>("create_file", { projectId, path }),
   rename: (projectId: string, from: string, to: string) =>
     invoke<void>("rename_file", { projectId, from, to }),
+  createFolder: (projectId: string, path: string) =>
+    invoke<void>("create_folder", { projectId, path }),
+  remove: (projectId: string, path: string) =>
+    invoke<void>("delete_entry", { projectId, path }),
+  importFiles: (projectId: string, folder: string, sources: string[]) =>
+    invoke<string[]>("import_files", { projectId, folder, sources }),
+  readBinary: async (projectId: string, path: string) =>
+    new Uint8Array(await invoke<ArrayBuffer>("read_binary", { projectId, path })),
   config: (projectId: string, config: ProjectConfig) =>
     invoke<void>("save_project_config", { projectId, config }),
   create: (parent: string, name: string, template: string) =>

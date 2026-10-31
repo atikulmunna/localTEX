@@ -51,6 +51,7 @@ export const demoProject: Project = {
   name: "A little space for big ideas",
   directory: "Browser preview · files stay in this browser",
   roots: ["main.tex"],
+  folders: [],
   files: demoDocuments.map((d) => ({
     path: d.path,
     size: d.text.length,

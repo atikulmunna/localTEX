@@ -16,6 +16,8 @@ export interface Project {
   name: string;
   directory: string;
   files: ProjectFile[];
+  /** Every non-hidden folder, so empty ones still appear in the tree. */
+  folders: string[];
   roots: string[];
   config: ProjectConfig;
 }

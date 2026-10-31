@@ -167,6 +167,42 @@ pub fn junction(_link: &Path, _target: &Path) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
 
+/// Moves a file or folder to the Recycle Bin, so a deletion can be undone from Windows.
+#[cfg(windows)]
+pub fn recycle(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
+        SHFILEOPSTRUCTW,
+    };
+    // The shell takes a list of paths ended by an empty one, hence two terminators.
+    let from: Vec<u16> = std::ffi::OsStr::new(&tool_path(path))
+        .encode_wide()
+        .chain([0, 0])
+        .collect();
+    let mut operation = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as u16,
+        ..Default::default()
+    };
+    let code = unsafe { SHFileOperationW(&mut operation) };
+    if code != 0 || operation.fAnyOperationsAborted != 0 {
+        return Err(std::io::Error::other(format!(
+            "Windows could not move it to the Recycle Bin (error {code}). Close any program using it, then try again."
+        )));
+    }
+    Ok(())
+}
+#[cfg(not(windows))]
+pub fn recycle(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

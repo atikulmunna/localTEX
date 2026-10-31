@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open, save, confirm } from "@tauri-apps/plugin-dialog";
 import { openUrl as openUrlInBrowser } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { EditorView } from "@codemirror/view";
 import {
   ArrowRight,
@@ -13,10 +14,12 @@ import {
   CircleHelp,
   Command,
   FilePlus2,
+  FolderPlus,
   FileText,
   Files,
   FolderOpen,
   Hash,
+  Image,
   ListTree,
   Loader2,
   LocateFixed,
@@ -25,7 +28,6 @@ import {
   Package,
   PanelLeftClose,
   PanelLeftOpen,
-  Pencil,
   Play,
   Plus,
   Save,
@@ -37,6 +39,7 @@ import {
   Sun,
   Terminal,
   TriangleAlert,
+  Upload,
   X,
 } from "lucide-react";
 import { api, desktop } from "./api";
@@ -44,6 +47,8 @@ import { Editor, clearEditorStates, forgetEditorState } from "./Editor";
 import { PdfPreview } from "./PdfPreview";
 import { Modal } from "./Modal";
 import { SetupDialog } from "./Setup";
+import { FileTree, previewable } from "./FileTree";
+import { FilePreview } from "./FilePreview";
 import {
   applySetupEvent,
   beginSetup,
@@ -53,6 +58,7 @@ import {
   type SetupView,
 } from "./setupState";
 import {
+  countWords,
   diagnostics,
   missingFiles,
   outline,
@@ -132,6 +138,7 @@ export default function App() {
     | "commands"
     | "help"
     | "setup"
+    | "folder"
     | null
   >(null);
   const modalRef = useRef(modal);
@@ -139,6 +146,10 @@ export default function App() {
   const [newName, setNewName] = useState("Untitled research");
   const [template, setTemplate] = useState<"article" | "thesis">("article");
   const [fileName, setFileName] = useState("");
+  // The folder new files, folders and added files go into ("" is the project root).
+  const [folder, setFolder] = useState("");
+  const [renaming, setRenaming] = useState("");
+  const [dropping, setDropping] = useState(false);
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [checking, setChecking] = useState(false);
   const [toolMessage, setToolMessage] = useState("");
@@ -150,6 +161,9 @@ export default function App() {
   );
   const [autoInstall, setAutoInstall] = useState(() =>
     readPreference("autoInstallPackages", false),
+  );
+  const [spellcheck, setSpellcheck] = useState(() =>
+    readPreference("spellcheck", true),
   );
   const [setup, setSetupView] = useState<SetupView>(idleSetup);
   const setupRef = useRef(setup);
@@ -184,6 +198,7 @@ export default function App() {
   const actions = useRef({
     build: async (_automatic = false, _install = false) => {},
     setup: (_e: SetupEvent) => {},
+    drop: async (_paths: string[]) => {},
     external: async () => {},
     event: async (_e: BuildEvent) => {},
     save: async () => {},
@@ -216,6 +231,12 @@ export default function App() {
   const rcFile = project?.files.find(
     (f) => f.path === "latexmkrc" || f.path === ".latexmkrc",
   )?.path;
+  // The index refreshes shortly after typing pauses, so counting follows it.
+  const words = useMemo(
+    () => countWords(buildOptions.root, currentDocs()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [documents, buildOptions.root],
+  );
   const notify = useCallback(
     (message: unknown) => setNotice(String(message)),
     [],
@@ -389,7 +410,10 @@ export default function App() {
     const p = projectRef.current;
     if (!p) return;
     try {
-      if (!buffers.current.has(path)) {
+      // Images and PDFs open as a preview; they have no text buffer.
+      const preview =
+        previewable(path) && !p.files.find((f) => f.path === path)?.editable;
+      if (!preview && !buffers.current.has(path)) {
         const doc = desktop
           ? await api.read(p.id, path)
           : documents.find((d) => d.path === path);
@@ -398,6 +422,8 @@ export default function App() {
       }
       setTabs((old) => (old.includes(path) ? old : [...old, path]));
       selectActive(path);
+      // New files go next to the one being worked on, as in Overleaf.
+      setFolder(path.split("/").slice(0, -1).join("/"));
       if (line)
         requestAnimationFrame(() =>
           requestAnimationFrame(() => jumpToLine(line)),
@@ -870,36 +896,111 @@ export default function App() {
       setChecking(false);
     }
   }
+  /** Paths at or inside `path`, which is a file or a folder. */
+  const within = (path: string, candidate: string) =>
+    candidate === path || candidate.startsWith(`${path}/`);
   async function createOrRename() {
     if (!project) return;
+    const name = fileName.trim().replace(/^\/+|\/+$/g, "");
     try {
-      if (!fileName.trim()) return;
-      if (desktop) {
-        if (modal === "rename") {
-          await saveAll(false);
-          await api.rename(project.id, active, fileName.trim());
-          const b = buffers.current.get(active);
-          if (b) {
-            buffers.current.delete(active);
-            buffers.current.set(fileName.trim(), {
-              ...b,
-              path: fileName.trim(),
-            });
-          }
-          setTabs((ts) => ts.map((t) => (t === active ? fileName.trim() : t)));
-          if (project.config.root === active)
-            await saveConfig({ root: fileName.trim() });
-          selectActive(fileName.trim());
-        } else await api.createFile(project.id, fileName.trim());
+      if (!name) return;
+      if (!desktop) {
+        notify("Files and folders can be changed in the desktop app.");
+        return;
+      }
+      if (modal === "rename") {
+        await saveAll(false);
+        await api.rename(project.id, renaming, name);
+        // Open tabs follow the file, or every file inside a renamed folder.
+        const moved = (path: string) =>
+          within(renaming, path) ? name + path.slice(renaming.length) : path;
+        for (const [path, b] of [...buffers.current]) {
+          if (!within(renaming, path)) continue;
+          buffers.current.delete(path);
+          buffers.current.set(moved(path), { ...b, path: moved(path) });
+        }
+        setTabs((ts) => ts.map(moved));
+        if (project.config.root && within(renaming, project.config.root))
+          await saveConfig({ root: moved(project.config.root) });
+        selectActive(moved(activeRef.current));
         await externalChanges();
-        await openFile(fileName.trim());
+      } else if (modal === "folder") {
+        await api.createFolder(project.id, name);
+        setFolder(name);
+        await externalChanges();
       } else {
-        notify("File creation and renaming are available in the desktop app.");
+        await api.createFile(project.id, name);
+        await externalChanges();
+        await openFile(name);
       }
       setModal(null);
     } catch (e) {
       notify(e);
     }
+  }
+  async function deleteEntry(path: string, isFolder: boolean) {
+    const p = projectRef.current;
+    if (!p) return;
+    if (!desktop) {
+      notify("Files and folders can be changed in the desktop app.");
+      return;
+    }
+    const unsaved = [...buffers.current.values()].some(
+      (b) => within(path, b.path) && b.text !== b.savedText,
+    );
+    const what = isFolder ? `the folder ${path} and everything in it` : path;
+    if (
+      !(await ask(
+        `Move ${what} to the Recycle Bin?${unsaved ? " Unsaved changes in it will be lost." : ""}`,
+      ))
+    )
+      return;
+    try {
+      await api.remove(p.id, path);
+      for (const buffered of [...buffers.current.keys()].filter((b) =>
+        within(path, b),
+      )) {
+        buffers.current.delete(buffered);
+        await discardDraft(buffered);
+      }
+      setTabs((old) => {
+        const next = old.filter((t) => !within(path, t));
+        if (within(path, activeRef.current)) selectActive(next.at(-1) ?? "");
+        return next;
+      });
+      if (p.config.root && within(path, p.config.root))
+        await saveConfig({ root: null });
+      if (within(path, folder)) setFolder("");
+      await externalChanges();
+      notify(`Moved ${isFolder ? "the folder" : path} to the Recycle Bin.`);
+    } catch (e) {
+      notify(e);
+    }
+  }
+  /** Copies files into the selected folder, from the Add files dialog or a drop. */
+  async function importPaths(paths: string[]) {
+    const p = projectRef.current;
+    if (!p || !paths.length) return;
+    try {
+      const added = await api.importFiles(p.id, folder, paths);
+      await externalChanges();
+      notify(
+        `Added ${added.length === 1 ? added[0] : `${added.length} files`} to ${folder || "the project"}.`,
+      );
+    } catch (e) {
+      notify(e);
+    }
+  }
+  async function addFiles() {
+    if (!desktop) {
+      notify("Files and folders can be changed in the desktop app.");
+      return;
+    }
+    const picked = await open({
+      multiple: true,
+      title: `Add files to ${folder || "the project"}`,
+    });
+    if (picked) await importPaths(Array.isArray(picked) ? picked : [picked]);
   }
   async function restoreDrafts() {
     editSerial.current++;
@@ -931,6 +1032,7 @@ export default function App() {
   actions.current = {
     build,
     setup: receiveSetup,
+    drop: importPaths,
     external: externalChanges,
     event: buildEvent,
     save: saveAll,
@@ -958,7 +1060,8 @@ export default function App() {
   }, [autoCompile]);
   useEffect(() => {
     persist("autoInstallPackages", autoInstall);
-  }, [autoInstall]);
+    persist("spellcheck", spellcheck);
+  }, [autoInstall, spellcheck]);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(""), 9000);
@@ -1009,6 +1112,15 @@ export default function App() {
     };
     void api.onBuild((e) => void actions.current.event(e)).then(keep);
     void api.onSetup((e) => actions.current.setup(e)).then(keep);
+    // Files dragged in from Explorer are copied into the project.
+    void getCurrentWebview()
+      .onDragDropEvent(({ payload }) => {
+        if (!projectRef.current) return;
+        if (payload.type === "enter" || payload.type === "over") setDropping(true);
+        else setDropping(false);
+        if (payload.type === "drop") void actions.current.drop(payload.paths);
+      })
+      .then(keep);
     void api
       .onFiles((e) => {
         if (e.projectId !== projectRef.current?.id) return;
@@ -1036,8 +1148,11 @@ export default function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
+      // Ctrl+B without Shift belongs to the editor (bold), as in Overleaf.
+      const sidebarKey = e.key.toLowerCase() === "b" && e.shiftKey;
       if (
-        ["s", "enter", "o", "k", "j", "b"].includes(e.key.toLowerCase()) ||
+        ["s", "enter", "o", "k", "j"].includes(e.key.toLowerCase()) ||
+        sidebarKey ||
         (e.key.toLowerCase() === "l" && e.shiftKey)
       )
         e.stopPropagation();
@@ -1062,7 +1177,7 @@ export default function App() {
         e.preventDefault();
         setMode((m) => (m === "write" ? "review" : "write"));
       }
-      if (e.key.toLowerCase() === "b") {
+      if (sidebarKey) {
         e.preventDefault();
         setSidebar((s) => !s);
       }
@@ -1110,7 +1225,7 @@ export default function App() {
     },
     {
       label: "Toggle sidebar",
-      hint: "Ctrl B",
+      hint: "Ctrl Shift B",
       run: () => setSidebar((s) => !s),
     },
     {
@@ -1162,7 +1277,7 @@ export default function App() {
             <button
               className="icon-button"
               aria-label="Toggle sidebar"
-              title="Toggle sidebar · Ctrl B"
+              title="Toggle sidebar · Ctrl Shift B"
               onClick={() => setSidebar((v) => !v)}
             >
               {sidebar ? (
@@ -1505,60 +1620,66 @@ export default function App() {
                   {sideTab === "files" ? (
                     <>
                       <div className="sidebar-heading">
-                        <span title={project.directory}>{project.name}</span>
                         <button
-                          className="icon-button"
-                          aria-label="New file"
-                          title="New file"
-                          onClick={() => {
-                            setFileName("untitled.tex");
-                            setModal("file");
-                          }}
+                          className="project-root"
+                          title={`${project.directory}. Click to add new files at the top level.`}
+                          onClick={() => setFolder("")}
                         >
-                          <FilePlus2 size={17} />
+                          {project.name}
                         </button>
-                      </div>
-                      {project.files.map((f) => (
-                        <div
-                          key={f.path}
-                          className={`file-row ${active === f.path ? "active" : ""}`}
-                        >
+                        <span className="heading-actions">
                           <button
-                            className="file-open"
-                            disabled={!f.editable}
-                            title={f.path}
-                            onClick={() => void openFile(f.path)}
+                            className="icon-button"
+                            aria-label="New file"
+                            title={`New file in ${folder || "the project"}`}
+                            onClick={() => {
+                              setFileName(`${folder ? `${folder}/` : ""}untitled.tex`);
+                              setModal("file");
+                            }}
                           >
-                            <span
-                              className={`file-glyph ${f.path.endsWith(".bib") ? "bib" : ""}`}
-                            >
-                              {f.path.endsWith(".tex")
-                                ? "T"
-                                : f.path.endsWith(".bib")
-                                  ? "B"
-                                  : "·"}
-                            </span>
-                            <span className="file-name">{f.path}</span>
-                            {buffers.current.get(f.path)?.text !==
-                              buffers.current.get(f.path)?.savedText && (
-                              <span className="dirty-dot" />
-                            )}
+                            <FilePlus2 size={17} />
                           </button>
-                          {active === f.path && (
-                            <button
-                              className="icon-button file-action"
-                              aria-label={`Rename ${f.path}`}
-                              title="Rename file"
-                              onClick={() => {
-                                setFileName(active);
-                                setModal("rename");
-                              }}
-                            >
-                              <Pencil size={14} />
-                            </button>
-                          )}
-                        </div>
-                      ))}
+                          <button
+                            className="icon-button"
+                            aria-label="New folder"
+                            title={`New folder in ${folder || "the project"}`}
+                            onClick={() => {
+                              setFileName(`${folder ? `${folder}/` : ""}figures`);
+                              setModal("folder");
+                            }}
+                          >
+                            <FolderPlus size={17} />
+                          </button>
+                          <button
+                            className="icon-button"
+                            aria-label="Add files"
+                            title={`Add files to ${folder || "the project"}. You can also drag them in from Explorer.`}
+                            onClick={() => void addFiles()}
+                          >
+                            <Upload size={16} />
+                          </button>
+                        </span>
+                      </div>
+                      <FileTree
+                        files={project.files}
+                        folders={project.folders}
+                        active={active}
+                        folder={folder}
+                        isDirty={(path) =>
+                          buffers.current.get(path)?.text !==
+                          buffers.current.get(path)?.savedText
+                        }
+                        onOpen={(path) => void openFile(path)}
+                        onSelectFolder={setFolder}
+                        onRename={(path) => {
+                          setRenaming(path);
+                          setFileName(path);
+                          setModal("rename");
+                        }}
+                        onDelete={(path, isFolder) =>
+                          void deleteEntry(path, isFolder)
+                        }
+                      />
                     </>
                   ) : sideTab === "outline" ? (
                     sections.length ? (
@@ -1631,11 +1752,15 @@ export default function App() {
                           title={path}
                         >
                           <button onClick={() => selectActive(path)}>
-                            <span
-                              className={`file-glyph ${path.endsWith(".bib") ? "bib" : ""}`}
-                            >
-                              {path.endsWith(".bib") ? "B" : "T"}
-                            </span>
+                            {previewable(path) ? (
+                              <Image size={15} className="tree-icon" />
+                            ) : (
+                              <span
+                                className={`file-glyph ${path.endsWith(".bib") ? "bib" : ""}`}
+                              >
+                                {path.endsWith(".bib") ? "B" : "T"}
+                              </span>
+                            )}
                             {filename(path)}
                             {buffers.current.get(path)?.text !==
                               buffers.current.get(path)?.savedText && (
@@ -1656,7 +1781,7 @@ export default function App() {
                         aria-label="Create file"
                         title="New file"
                         onClick={() => {
-                          setFileName("untitled.tex");
+                          setFileName(`${folder ? `${folder}/` : ""}untitled.tex`);
                           setModal("file");
                         }}
                       >
@@ -1667,7 +1792,7 @@ export default function App() {
                       className="pane-action"
                       aria-label="Jump to PDF"
                       title="Jump to PDF · Ctrl Shift L"
-                      disabled={!pdf}
+                      disabled={!pdf || !buffer}
                       onClick={() => void syncForward()}
                     >
                       <LocateFixed size={16} />
@@ -1700,6 +1825,7 @@ export default function App() {
                       bufferKey={`${project.id}:${active}:${bufferVersion}`}
                       initialText={buffer.text}
                       documents={documents}
+                      spellcheck={spellcheck}
                       diagnostics={issues.filter((issue) =>
                         issue.path
                           ? relativeSource(project.directory, issue.path) ===
@@ -1712,6 +1838,8 @@ export default function App() {
                         editor.current = view;
                       }}
                     />
+                  ) : active && previewable(active) ? (
+                    <FilePreview projectId={project.id} path={active} />
                   ) : (
                     <div className="empty-state">
                       <FileText size={28} />
@@ -1902,6 +2030,14 @@ export default function App() {
               {dirty ? "Unsaved changes" : savedAt}
             </span>
             <span className="status-spacer" />
+            {buildOptions.root && (
+              <span
+                className="status-words"
+                title="Words in the document text, including files it inputs. Commands, math and comments are not counted."
+              >
+                {words.toLocaleString()} {words === 1 ? "word" : "words"}
+              </span>
+            )}
             <span>
               Ln {cursor.line}, Col {cursor.column}
             </span>
@@ -1916,6 +2052,13 @@ export default function App() {
             </span>
           </footer>
         </>
+      )}
+      {dropping && project && (
+        <div className="drop-overlay" aria-hidden="true">
+          <Upload size={28} />
+          <strong>Drop to add files to {folder || project.name}</strong>
+          <span>They are copied into the project folder.</span>
+        </div>
       )}
       {busy && (
         <div className="busy-indicator" role="status">
@@ -2000,9 +2143,15 @@ export default function App() {
           </form>
         </Modal>
       )}
-      {(modal === "file" || modal === "rename") && (
+      {(modal === "file" || modal === "rename" || modal === "folder") && (
         <Modal
-          title={modal === "rename" ? "Rename file" : "New file"}
+          title={
+            modal === "rename"
+              ? `Rename ${project?.folders.includes(renaming) ? "folder" : "file"}`
+              : modal === "folder"
+                ? "New folder"
+                : "New file"
+          }
           onClose={() => setModal(null)}
         >
           <form
@@ -2012,22 +2161,37 @@ export default function App() {
             }}
           >
             <p className="modal-intro">
-              Use a path inside this project folder. Renaming doesn’t update
-              \input or \include references.
+              {modal === "rename"
+                ? "Include a folder to move it, for example chapters/intro.tex. Renaming doesn’t update \\input, \\include or \\includegraphics references."
+                : "Use a path inside this project, for example chapters/intro.tex."}
             </p>
             <label className="field-label">
-              File name
+              {modal === "folder" ? "Folder name" : "Name"}
               <input
                 autoFocus
                 value={fileName}
                 onChange={(e) => setFileName(e.target.value)}
+                onFocus={(e) => {
+                  // Select just the name, keeping the folder part, as Explorer does.
+                  const value = e.target.value;
+                  const start = value.lastIndexOf("/") + 1;
+                  const dot = value.lastIndexOf(".");
+                  e.target.setSelectionRange(
+                    start,
+                    dot > start && modal !== "folder" ? dot : value.length,
+                  );
+                }}
                 required
               />
             </label>
             <div className="modal-footer">
               <span />
               <button className="button primary" type="submit">
-                {modal === "rename" ? "Rename" : "Create file"}
+                {modal === "rename"
+                  ? "Rename"
+                  : modal === "folder"
+                    ? "Create folder"
+                    : "Create file"}
               </button>
             </div>
           </form>
@@ -2070,6 +2234,21 @@ export default function App() {
                   type="checkbox"
                   checked={autoCompile}
                   onChange={(e) => setAutoCompile(e.target.checked)}
+                />
+              </label>
+              <label className="setting-row">
+                <div>
+                  <strong>Check spelling</strong>
+                  <p>
+                    Underlines misspelled words in your text, not in commands,
+                    math or labels. Uses the languages installed in Windows;
+                    right-click a word for suggestions.
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={spellcheck}
+                  onChange={(e) => setSpellcheck(e.target.checked)}
                 />
               </label>
             </section>
@@ -2377,7 +2556,12 @@ export default function App() {
               ["Open project", "Ctrl O"],
               ["Command palette", "Ctrl K"],
               ["Write / Review", "Ctrl J"],
-              ["Show / hide sidebar", "Ctrl B"],
+              ["Show / hide sidebar", "Ctrl Shift B"],
+              ["Bold / italic", "Ctrl B / Ctrl I"],
+              ["Comment lines", "Ctrl /"],
+              ["Fold / unfold section", "Ctrl Shift [ / ]"],
+              ["Add cursor", "Ctrl click"],
+              ["Select next match", "Ctrl D"],
               ["Jump from source to PDF", "Ctrl Shift L"],
               ["Find in current file", "Ctrl F"],
               ["Go to source", "Double-click PDF"],
