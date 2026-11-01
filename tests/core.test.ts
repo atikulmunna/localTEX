@@ -7,6 +7,7 @@ import {
   foldEnd,
   missingFiles,
   nonProse,
+  requiredFiles,
   outline,
   projectSymbols,
   relativeSource,
@@ -335,4 +336,27 @@ test("command names that start like a shorter one still skip their argument", ()
     countWords("main.tex", [{ path: "main.tex", revision: "a", text }]),
     4,
   );
+});
+test("the packages and classes a project loads are found, except its own files", () => {
+  const docs: DocumentFile[] = [
+    {
+      path: "main.tex",
+      revision: "a",
+      text: String.raw`\documentclass[conference]{IEEEtran}
+\usepackage[ruled,vlined]{algorithm2e}
+\usepackage{amsmath, graphicx}
+% \usepackage{commentedout}
+\usepackage{mystyle}
+\usepackage{\foo}`,
+    },
+    { path: "styles/mystyle.sty", revision: "b", text: String.raw`\RequirePackage{tikz}` },
+    { path: "notes.txt", revision: "c", text: String.raw`\usepackage{ignored}` },
+  ];
+  assert.deepEqual(requiredFiles(docs, ["main.tex", "styles/mystyle.sty", "notes.txt"]), [
+    "IEEEtran.cls",
+    "algorithm2e.sty",
+    "amsmath.sty",
+    "graphicx.sty",
+    "tikz.sty",
+  ]);
 });

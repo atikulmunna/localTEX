@@ -26,7 +26,8 @@ test("auto compile debounces edits, saves first, and coalesces edits during a bu
   expect(first.text).toContain("First edit");
   expect(first.text).toContain("Second edit");
   expect(first.force).toBe(false);
-  expect(first.install).toBe(false);
+  // Downloading missing packages is on by default, so builds may fetch them too.
+  expect(first.install).toBe(true);
   await page.keyboard.insertText("% While compiling\n");
   await page.waitForTimeout(1400);
   expect((await recorded(page)).builds.length).toBe(1);

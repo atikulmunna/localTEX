@@ -382,3 +382,27 @@ export function foldEnd(
   }
   return null;
 }
+/** Package and class files the documents load, except those the project provides itself. */
+export function requiredFiles(documents: DocumentFile[], projectFiles: string[]) {
+  const local = new Set(
+    projectFiles.map((path) => path.split("/").at(-1)!.toLowerCase()),
+  );
+  const files = new Set<string>();
+  const add = (file: string) => {
+    if (/^[A-Za-z0-9@_.-]+\.(?:sty|cls)$/.test(file) && !local.has(file.toLowerCase()))
+      files.add(file);
+  };
+  for (const doc of documents) {
+    if (!/\.(?:tex|sty|cls)$/i.test(doc.path)) continue;
+    const source = withoutComments(doc.text);
+    for (const match of source.matchAll(
+      /\\(?:usepackage|RequirePackage)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}/g,
+    ))
+      for (const name of match[1].split(",")) add(`${name.trim()}.sty`);
+    for (const match of source.matchAll(
+      /\\(?:documentclass|LoadClass)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}/g,
+    ))
+      add(`${match[1].trim()}.cls`);
+  }
+  return [...files].sort();
+}

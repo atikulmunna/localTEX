@@ -1,4 +1,5 @@
 pub mod encoding;
+pub mod fetch;
 pub mod paths;
 pub mod process;
 pub mod process_job;

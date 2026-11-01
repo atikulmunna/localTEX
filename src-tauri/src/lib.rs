@@ -30,6 +30,8 @@ struct AppState {
     setup: Mutex<Option<Arc<AtomicBool>>>,
     /// Whether (tool folder, engine) belongs to MiKTeX, learned once per session.
     miktex: Mutex<HashMap<(String, String), bool>>,
+    /// One package download at a time, so MiKTeX never installs the same file twice.
+    fetching: Mutex<()>,
 }
 /// Written when setup succeeds, so later launches skip it.
 #[derive(Serialize, Deserialize)]
@@ -547,6 +549,40 @@ fn cancel_setup(state: State<'_, AppState>) -> Result<()> {
     }
     Ok(())
 }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackageFetch {
+    /// False for TeX Live and others, which have no on-the-fly installer.
+    supported: bool,
+    #[serde(flatten)]
+    result: localtex_core::fetch::Fetched,
+}
+/// Installs packages and classes a document loads before it is compiled.
+#[tauri::command]
+async fn fetch_packages(
+    app: tauri::AppHandle,
+    directory: Option<String>,
+    engine: String,
+    files: Vec<String>,
+) -> Result<PackageFetch> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = tool_folder(&directory);
+        if !detect_miktex(&app, &directory, &engine)? {
+            return Ok(PackageFetch {
+                supported: false,
+                result: Default::default(),
+            });
+        }
+        let state = app.state::<AppState>();
+        let _one_at_a_time = state.fetching.lock().map_err(|e| e.to_string())?;
+        Ok(PackageFetch {
+            supported: true,
+            result: localtex_core::fetch::fetch(&directory, &engine, &files)?,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 #[tauri::command]
 async fn spelling_languages() -> Result<Vec<String>> {
     tauri::async_runtime::spawn_blocking(spelling::languages)
@@ -977,6 +1013,7 @@ pub fn run() {
             delete_entry,
             import_files,
             read_binary,
+            fetch_packages,
             spelling_languages,
             check_spelling,
             spelling_suggestions,

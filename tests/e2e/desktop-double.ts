@@ -54,6 +54,9 @@ export async function installDesktopDouble(
       configs: [],
       fileOps: [],
       spellChecks: [],
+      fetches: [],
+      holdFetch: false,
+      releaseFetch: () => {},
       conflict: false,
       setupStatus: {
         complete: options.setupComplete ?? true,
@@ -154,6 +157,19 @@ export async function installDesktopDouble(
           }));
         }
         if (command === "spelling_suggestions") return ["the", "ten"];
+        // MiKTeX lacks algorithm2e (it downloads) and nosuchpkg (a typo, it fails).
+        if (command === "fetch_packages") {
+          w.testIPC.fetches.push(args);
+          const result = {
+            supported: true,
+            installed: args.files.filter((f: string) => f.startsWith("algorithm2e")),
+            failed: args.files.filter((f: string) => f.startsWith("nosuchpkg")),
+          };
+          if (!w.testIPC.holdFetch) return result;
+          return new Promise((resolve) => {
+            w.testIPC.releaseFetch = () => resolve(result);
+          });
+        }
         if (command === "add_to_dictionary") {
           w.testIPC.fileOps.push({ command, ...args });
           return;
@@ -181,5 +197,6 @@ export const recorded = (page: Page) =>
       configs: t.configs as Record<string, any>[],
       fileOps: t.fileOps as Record<string, any>[],
       spellChecks: t.spellChecks as { language: string; text: string }[],
+      fetches: t.fetches as { engine: string; files: string[] }[],
     };
   });

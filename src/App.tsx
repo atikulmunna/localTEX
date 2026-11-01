@@ -61,6 +61,7 @@ import {
 import {
   countWords,
   diagnostics,
+  requiredFiles,
   missingFiles,
   outline,
   relativeSource,
@@ -171,9 +172,15 @@ export default function App() {
   const [autoCompile, setAutoCompile] = useState(() =>
     readPreference("autoCompileOnEdit", true),
   );
-  const [autoInstall, setAutoInstall] = useState(() =>
-    readPreference("autoInstallPackages", false),
+  const [downloadPackages, setDownloadPackages] = useState(() =>
+    readPreference("downloadPackages", true),
   );
+  const downloadRef = useRef(downloadPackages);
+  downloadRef.current = downloadPackages;
+  // Package and class files already checked this session, and the download in progress.
+  const checkedFiles = useRef(new Set<string>());
+  const packageFetch = useRef<Promise<void> | null>(null);
+  const [fetchingPackages, setFetchingPackages] = useState(false);
   const [spellcheck, setSpellcheck] = useState(() =>
     readPreference("spellcheck", true),
   );
@@ -235,6 +242,7 @@ export default function App() {
     build: async (_automatic = false, _install = false) => {},
     setup: (_e: SetupEvent) => {},
     drop: async (_paths: string[]) => {},
+    packages: async () => {},
     external: async () => {},
     event: async (_e: BuildEvent) => {},
     save: async () => {},
@@ -339,8 +347,10 @@ export default function App() {
   async function saveBuffers(scheduleBuild: boolean) {
     const p = projectRef.current;
     if (!p) return;
+    const saved: DocumentFile[] = [];
     for (const b of buffers.current.values()) {
       if (b.text === b.savedText) continue;
+      saved.push({ path: b.path, text: b.text, revision: b.revision });
       if (b.conflict || b.missing)
         throw new Error(
           `Resolve the external change in ${b.path} before saving.`,
@@ -357,6 +367,7 @@ export default function App() {
     setDirtyVersion((v) => v + 1);
     setSavedAt("All changes saved");
     refreshIndex();
+    void ensurePackages(saved);
     if (scheduleBuild) scheduleAutoCompile();
   }
   function scheduleAutoCompile() {
@@ -408,10 +419,53 @@ export default function App() {
       else if (next.failure?.problem !== "cancelled")
         notify("LaTeX setup needs attention. Open it from the top bar.");
     }
+    if (next.status === "ready") void actions.current.packages();
     if (buildAfterSetup.current) {
       buildAfterSetup.current = false;
       void actions.current.build();
     }
+  }
+  /**
+   * Downloads the packages and classes the documents load and MiKTeX lacks, before they
+   * are compiled. Each file is checked once per session.
+   */
+  async function ensurePackages(docs: DocumentFile[]) {
+    const p = projectRef.current;
+    if (!desktop || !p || !downloadRef.current) return;
+    if (setupRef.current.status === "running" || setupRef.current.miktex === false)
+      return;
+    const files = requiredFiles(
+      docs,
+      p.files.map((f) => f.path),
+    ).filter((file) => !checkedFiles.current.has(file));
+    if (!files.length) return;
+    files.forEach((file) => checkedFiles.current.add(file));
+    const { engine } = resolveBuild(p, buffers.current.get(activeRef.current), docs);
+    const names = (list: string[]) =>
+      list.map((file) => file.replace(/\.(?:sty|cls)$/, "")).join(", ");
+    const run = (packageFetch.current ?? Promise.resolve()).then(async () => {
+      setFetchingPackages(true);
+      try {
+        const result = await api.fetchPackages(settings.toolDirectory, engine, files);
+        if (!result.supported) return;
+        if (result.installed.length)
+          notify(`Downloaded ${names(result.installed)} for this project.`);
+        // Not retried this session: a typo or a file the project should contain.
+        if (result.failed.length)
+          notify(
+            `Couldn’t download ${names(result.failed)}. If it’s your own file, add it to the project; otherwise check the name and your connection.`,
+          );
+      } catch {
+        files.forEach((file) => checkedFiles.current.delete(file));
+      } finally {
+        if (packageFetch.current === run) {
+          packageFetch.current = null;
+          setFetchingPackages(false);
+        }
+      }
+    });
+    packageFetch.current = run;
+    await run;
   }
   async function stopSetup() {
     try {
@@ -513,6 +567,7 @@ export default function App() {
       await api.saveSettings(next);
       const docs = await api.index(p.id);
       setDocuments(docs);
+      void ensurePackages(docs);
       setRecovery(await api.drafts(p.id));
       const first =
         resolveBuild(p).root ??
@@ -677,6 +732,7 @@ export default function App() {
           );
         return;
       }
+      if (packageFetch.current) await packageFetch.current;
       // Capture before asynchronous saving so edits made during the save mark the PDF stale.
       const serial = editSerial.current;
       await saveAll(false);
@@ -698,7 +754,7 @@ export default function App() {
           install ||
           buildStatus === "failed" ||
           buildStatus === "cancelled",
-        install || autoInstall,
+        install || downloadPackages,
       );
     } catch (e) {
       buildId.current = null;
@@ -1074,6 +1130,7 @@ export default function App() {
     build,
     setup: receiveSetup,
     drop: importPaths,
+    packages: () => ensurePackages(currentDocs()),
     external: externalChanges,
     event: buildEvent,
     save: saveAll,
@@ -1100,10 +1157,10 @@ export default function App() {
     }
   }, [autoCompile]);
   useEffect(() => {
-    persist("autoInstallPackages", autoInstall);
+    persist("downloadPackages", downloadPackages);
     persist("spellcheck", spellcheck);
     persist("spellLanguage", spellLanguage);
-  }, [autoInstall, spellcheck, spellLanguage]);
+  }, [downloadPackages, spellcheck, spellLanguage]);
   useEffect(() => {
     if (desktop) void api.spellingLanguages().then(setSpellLanguages).catch(() => {});
   }, []);
@@ -2078,6 +2135,11 @@ export default function App() {
               </span>
               <ChevronRight size={13} />
             </button>
+            {fetchingPackages && (
+              <span className="status-fetch" role="status" aria-live="polite">
+                <Loader2 className="spin" size={13} /> Getting packages…
+              </span>
+            )}
             <span className="status-saved">
               {dirty ? "Unsaved changes" : savedAt}
             </span>
@@ -2452,17 +2514,19 @@ export default function App() {
               </div>
               <label className="setting-row">
                 <div>
-                  <strong>Install missing packages automatically</strong>
+                  <strong>Download missing packages automatically</strong>
                   <p>
-                    When a document needs a package that isn’t installed,
-                    MiKTeX downloads it during the build. When this is off,
-                    localTEX asks first.
+                    When a document loads a package that isn’t installed,
+                    MiKTeX downloads it in the background as soon as you open
+                    or save the file, before you compile. Builds can also
+                    fetch anything still missing. When this is off, localTEX
+                    asks first.
                   </p>
                 </div>
                 <input
                   type="checkbox"
-                  checked={autoInstall}
-                  onChange={(e) => setAutoInstall(e.target.checked)}
+                  checked={downloadPackages}
+                  onChange={(e) => setDownloadPackages(e.target.checked)}
                 />
               </label>
               <label className="field-label">
@@ -2558,8 +2622,9 @@ export default function App() {
                 <strong>Your work stays yours.</strong>
                 <p>
                   No accounts, analytics, or cloud compilation. Fonts and PDF
-                  rendering are bundled. localTEX goes online only to install
-                  LaTeX packages, and only when you set up LaTeX or ask it to.
+                  rendering are bundled. localTEX goes online only to
+                  download LaTeX packages: during setup, and when a document
+                  needs one that isn’t installed (you can turn that off above).
                 </p>
               </div>
             </div>

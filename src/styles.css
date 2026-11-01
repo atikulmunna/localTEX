@@ -1642,6 +1642,12 @@ kbd {
 .status-spacer {
   flex: 1;
 }
+.status-fetch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent-text);
+}
 .status-words {
   font-variant-numeric: tabular-nums;
 }

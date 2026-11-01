@@ -1,6 +1,7 @@
 // Run against a debug desktop instance started with a loopback WebView2 debug port.
 import {chromium} from '@playwright/test';
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
 import {existsSync} from 'node:fs';
 import {mkdir,readFile,rm,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
@@ -67,11 +68,18 @@ assert.equal(untrusted.config.shellEscape,false);assert.equal(untrusted.config.l
 // Consent given in this app is recorded locally, so the next build reads the rc file.
 await invoke('save_project_config',{projectId:project.id,config:{version:1,root:'main.tex',engine:'pdflatex',shellEscape:false,latexmkrc:true}});
 assert.equal((await invoke('refresh_project',{projectId:project.id})).config.latexmkrc,true);
+// A package the document loads is downloaded when the project opens, before compiling.
+const findtexmf=file=>{try{return execFileSync('findtexmf',[file],{timeout:30_000}).toString().trim();}catch{return '';}};
+const algorithmMissing=!findtexmf('algorithm2e.sty');
+const mainPath=join(directory,'main.tex');
+await writeFile(mainPath,(await readFile(mainPath,'utf8')).replace('\\usepackage[T1]{fontenc}','\\usepackage[T1]{fontenc}\n\\usepackage[ruled]{algorithm2e}'),'utf8');
 await invoke('save_settings',{settings:{recent:[directory],toolDirectory:null}});
 await page.reload();await page.getByRole('button').filter({hasText:project.name}).click();
 await page.getByRole('textbox',{name:'LaTeX source editor'}).waitFor();
 // A finished setup is remembered, so the reload must not show it again.
 assert.equal(await page.getByRole('dialog').count(),0);
+if(algorithmMissing)await page.getByText('Downloaded algorithm2e for this project.').waitFor({timeout:10*60_000});
+assert.ok(findtexmf('algorithm2e.sty'),'algorithm2e should be installed');
 await page.getByRole('button',{name:/^Compile/}).click();
 await page.locator('.pdf-page canvas').first().waitFor({timeout:5*60_000});
 await page.getByText('PDF is up to date').waitFor();
@@ -104,7 +112,7 @@ await misspelled.filter({hasText:'Thsi'}).click({button:'right'});
 await page.getByRole('menuitem',{name:'This',exact:true}).click();
 assert.match(await editor.innerText(),/This sentense/);
 await page.locator('.cm-line',{hasText:'sentense'}).screenshot({path:'.cache/native-spellcheck.png'});
-console.log('Native smoke passed: first-launch LaTeX setup, remembered setup, project creation/open, file read/save/conflict, traversal rejection, rename, settings, recovery, indexing, local trust, UI project loading, CRLF/BOM-preserving saves, Windows-1252 files, folders, added files, image preview, Recycle Bin delete, trusted latexmkrc, Ctrl+B, word count, Windows spell checking with suggestions, and a real compile to PDF.');
+console.log('Native smoke passed: first-launch LaTeX setup, remembered setup, project creation/open, file read/save/conflict, traversal rejection, rename, settings, recovery, indexing, local trust, UI project loading, CRLF/BOM-preserving saves, Windows-1252 files, folders, added files, image preview, Recycle Bin delete, trusted latexmkrc, Ctrl+B, word count, Windows spell checking with suggestions, downloading a package before compiling, and a real compile to PDF.');
 await browser.close();
 // The project exists only for this run; its Bangla name checks non-ASCII paths.
 await rm(directory,{recursive:true,force:true});

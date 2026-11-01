@@ -34,6 +34,11 @@ export const api = {
     invoke<void>("delete_entry", { projectId, path }),
   importFiles: (projectId: string, folder: string, sources: string[]) =>
     invoke<string[]>("import_files", { projectId, folder, sources }),
+  fetchPackages: (directory: string | null, engine: Engine, files: string[]) =>
+    invoke<{ supported: boolean; installed: string[]; failed: string[] }>(
+      "fetch_packages",
+      { directory, engine, files },
+    ),
   spellingLanguages: () => invoke<string[]>("spelling_languages"),
   checkSpelling: async (language: string, text: string) =>
     (
