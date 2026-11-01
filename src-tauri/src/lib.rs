@@ -972,6 +972,11 @@ async fn synctex(
     .map_err(|e| e.to_string())?
 }
 pub fn run() {
+    // Started from a shell or terminal whose environment predates a LaTeX or Perl
+    // installation, the app would not find them. Set before any thread starts.
+    if let Some(path) = localtex_core::process::tool_search_path() {
+        std::env::set_var("PATH", path);
+    }
     let context = tauri::generate_context!();
     #[cfg(debug_assertions)]
     let context = {

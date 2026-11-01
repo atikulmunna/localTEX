@@ -305,6 +305,142 @@ fn drain(mut reader: impl Read, limit: usize) -> Vec<u8> {
     }
     result
 }
+/// Where tools are looked for: the PATH this process started with, then the PATH Windows
+/// has on record now, then the usual MiKTeX, TeX Live and Strawberry Perl folders. An app
+/// started from an environment that predates a LaTeX or Perl installation still finds it.
+pub fn tool_search_path() -> Option<std::ffi::OsString> {
+    let mut folders: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    let same = |a: &Path, b: &Path| {
+        let plain = |p: &Path| {
+            p.to_string_lossy()
+                .trim_end_matches(['\\', '/'])
+                .to_lowercase()
+        };
+        plain(a) == plain(b)
+    };
+    let registered = registered_path()
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>());
+    for folder in registered.chain(usual_tool_folders()) {
+        if folder.is_dir() && !folders.iter().any(|known| same(known, &folder)) {
+            folders.push(folder);
+        }
+    }
+    std::env::join_paths(folders).ok()
+}
+fn usual_tool_folders() -> Vec<PathBuf> {
+    let variable = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    let mut folders = Vec::new();
+    if let Some(local) = variable("LOCALAPPDATA") {
+        folders.push(local.join(r"Programs\MiKTeX\miktex\bin\x64"));
+    }
+    for programs in [variable("ProgramFiles"), variable("ProgramFiles(x86)")]
+        .into_iter()
+        .flatten()
+    {
+        folders.push(programs.join(r"MiKTeX\miktex\bin\x64"));
+        folders.push(programs.join(r"MiKTeX\miktex\bin"));
+    }
+    // TeX Live installs into C:\texlive\<year>; the newest year comes first.
+    let mut years: Vec<PathBuf> = std::fs::read_dir(r"C:\texlive")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.len() == 4 && name.chars().all(|c| c.is_ascii_digit()))
+        })
+        .collect();
+    years.sort();
+    for year in years.iter().rev() {
+        for architecture in ["windows", "win64", "win32"] {
+            folders.push(year.join("bin").join(architecture));
+        }
+    }
+    folders.push(PathBuf::from(r"C:\Strawberry\perl\bin"));
+    folders
+}
+/// The machine and user PATH values as stored now, with %VARIABLES% expanded.
+#[cfg(windows)]
+fn registered_path() -> Vec<std::ffi::OsString> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::System::{
+        Environment::ExpandEnvironmentStringsW,
+        Registry::{
+            RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_ANY,
+        },
+    };
+    let wide = |text: &str| -> Vec<u16> {
+        std::ffi::OsStr::new(text)
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    };
+    let read = |root: HKEY, key: &str| -> Option<std::ffi::OsString> {
+        let (key, name) = (wide(key), wide("Path"));
+        let flags = RRF_RT_ANY | RRF_NOEXPAND;
+        let mut size = 0u32;
+        unsafe {
+            let none = std::ptr::null_mut();
+            // First call: the size only.
+            if RegGetValueW(
+                root,
+                key.as_ptr(),
+                name.as_ptr(),
+                flags,
+                none,
+                std::ptr::null_mut(),
+                &mut size,
+            ) != 0
+            {
+                return None;
+            }
+            let mut raw = vec![0u16; size as usize / 2 + 1];
+            if RegGetValueW(
+                root,
+                key.as_ptr(),
+                name.as_ptr(),
+                flags,
+                none,
+                raw.as_mut_ptr().cast(),
+                &mut size,
+            ) != 0
+            {
+                return None;
+            }
+            let needed = ExpandEnvironmentStringsW(raw.as_ptr(), std::ptr::null_mut(), 0);
+            if needed == 0 {
+                return None;
+            }
+            let mut expanded = vec![0u16; needed as usize];
+            let written = ExpandEnvironmentStringsW(raw.as_ptr(), expanded.as_mut_ptr(), needed);
+            if written == 0 || written > needed {
+                return None;
+            }
+            Some(std::ffi::OsString::from_wide(
+                &expanded[..written as usize - 1],
+            ))
+        }
+    };
+    [
+        read(
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+        read(HKEY_CURRENT_USER, "Environment"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+#[cfg(not(windows))]
+fn registered_path() -> Vec<std::ffi::OsString> {
+    Vec::new()
+}
 const TOOLS: &[&str] = &[
     "pdflatex", "xelatex", "lualatex", "latexmk", "synctex", "bibtex", "biber", "perl",
 ];
@@ -312,7 +448,9 @@ fn check_tool(directory: &Option<String>, name: &str) -> ToolStatus {
     let mut cmd = command(executable(directory, name));
     apply_path(&mut cmd, directory);
     cmd.arg("--version");
-    match output_timeout(cmd, Duration::from_secs(30)) {
+    // MiKTeX's biber unpacks itself on its first run, which can take a minute or more.
+    let limit = if name == "biber" { 180 } else { 30 };
+    match output_timeout(cmd, Duration::from_secs(limit)) {
         Ok((success, text)) => ToolStatus {
             name: name.into(),
             available: success,
@@ -432,6 +570,32 @@ mod tests {
             CANCELLED
         );
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn tools_installed_after_an_old_environment_are_still_found() {
+        let inherited: Vec<PathBuf> =
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+        let search: Vec<PathBuf> = std::env::split_paths(&tool_search_path().unwrap()).collect();
+        // The inherited order is kept; additions only follow it.
+        assert_eq!(&search[..inherited.len()], &inherited[..]);
+        let miktex = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+            .join(r"Programs\MiKTeX\miktex\bin\x64");
+        let plain = |p: &Path| p.to_string_lossy().trim_end_matches('\\').to_lowercase();
+        if miktex.is_dir() {
+            assert!(search.iter().any(|p| plain(p) == plain(&miktex)));
+        }
+        // Added folders never repeat one that is already there.
+        for (i, added) in search.iter().enumerate().skip(inherited.len()) {
+            assert!(
+                !search[..i].iter().any(|p| plain(p) == plain(added)),
+                "{added:?}"
+            );
+        }
+        assert!(
+            !registered_path().is_empty(),
+            "Windows keeps a PATH in the registry"
+        );
     }
     #[test]
     fn installer_flag_follows_distribution_and_consent() {
