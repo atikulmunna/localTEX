@@ -123,7 +123,10 @@ pub fn configure_latexmk(
             _ => "-pdf",
         },
         "-interaction=nonstopmode",
-        "-halt-on-error",
+        // Keep going past recoverable errors, as Overleaf does: one stray character must
+        // not cost the whole PDF, and the bibliography and references still get resolved.
+        // latexmk still exits with an error, so the app reports the errors with the PDF.
+        "-f",
         "-file-line-error",
         "-synctex=1",
         if shell_escape {
@@ -134,9 +137,20 @@ pub fn configure_latexmk(
     ]);
     // MiKTeX would otherwise show its own installation dialog mid-build. Downloads happen
     // only when the user asked for them. The templates contain only the validated engine name.
+    // TeX wraps its output at 79 columns, splitting long file paths and error messages
+    // across lines. TeX Live reads the width from the environment; MiKTeX takes an
+    // option, which its LuaTeX rejects (the app rejoins those lines instead).
+    cmd.env("max_print_line", "10000");
+    let wide = if engine == "lualatex" {
+        ""
+    } else {
+        " --max-print-line=10000"
+    };
     match installer {
-        Installer::Disabled => cmd.arg(format!("-{engine}={engine} --disable-installer %O %S")),
-        Installer::Enabled => cmd.arg(format!("-{engine}={engine} --enable-installer %O %S")),
+        Installer::Disabled => {
+            cmd.arg(format!("-{engine}={engine}{wide} --disable-installer %O %S"))
+        }
+        Installer::Enabled => cmd.arg(format!("-{engine}={engine}{wide} --enable-installer %O %S")),
         Installer::Unsupported => &mut cmd,
     };
     if let Some(output) = output {
@@ -617,8 +631,27 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(args.contains(&"-pdflatex=pdflatex --enable-installer %O %S".into()));
+        assert!(args.contains(
+            &"-pdflatex=pdflatex --max-print-line=10000 --enable-installer %O %S".into()
+        ));
         // Only the trusted project rc is read, and localTEX's options come after it.
         assert_eq!(args[..4], ["-norc", "-r", "./latexmkrc", "-pdf"]);
+        // Errors don't stop the build; MiKTeX's LuaTeX gets no width option it would reject.
+        assert!(args.contains(&"-f".into()) && !args.contains(&"-halt-on-error".into()));
+        let lua: Vec<_> = configure_latexmk(
+            &None,
+            "lualatex",
+            Path::new("."),
+            "main.tex",
+            None,
+            false,
+            Installer::Disabled,
+            None,
+        )
+        .unwrap()
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+        assert!(lua.contains(&"-lualatex=lualatex --disable-installer %O %S".into()));
     }
 }

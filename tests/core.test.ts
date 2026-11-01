@@ -140,6 +140,59 @@ test("ambiguous or missing root requires an explicit choice", () => {
   );
   assert.equal(resolveBuild({ ...project, roots: [] }).root, null);
 });
+test("errors come first, including ones in the generated bibliography", () => {
+  // TeX's 79-column wrapping splits a long build path mid-message, as in a real log.
+  const wrap = (text: string) => text.match(/.{1,79}/gu)!.join("\n");
+  const bbl = String.raw`C:\Users\me\AppData\Local\Temp\paper drafts\IEEE sensors journal\draft one\.localtex/build\jsen.bbl`;
+  const log = [
+    String.raw`Underfull \hbox (badness 10000) in paragraph at lines 187--188`,
+    "LaTeX Warning: Citation `joy2024novel' on page 3 undefined on input line 196.",
+    wrap(`${bbl}:75: LaTeX Error: Unicode character ₂ (U+2082)`),
+    "               not set up for use with LaTeX.",
+    "",
+    "See the LaTeX manual or LaTeX Companion for explanation.",
+    "l.75 ...cf-spr biosensor with dual-layer au/tio₂",
+    "./sections/methods.tex:12: Undefined control sequence.",
+    String.raw`l.12 \foo`,
+    "Latexmk: Summary of warnings from last run of *latex:",
+  ].join("\n");
+  assert.ok(log.split("\n").filter((l) => l.length === 79).length >= 1);
+  const found = diagnostics(log);
+  assert.deepEqual(
+    found.map((d) => d.severity),
+    ["error", "error", "warning", "warning"],
+  );
+  assert.equal(found[0].bibliography, true);
+  assert.equal(
+    found[0].message,
+    "In the bibliography: LaTeX Error: Unicode character ₂ (U+2082) not set up for use with LaTeX. Near “cf-spr biosensor with dual-layer au/tio₂”.",
+  );
+  assert.deepEqual([found[1].path, found[1].line], ["sections/methods.tex", 12]);
+  assert.match(found[2].message, /^LaTeX Warning: Citation/);
+  // Box warnings rarely matter, so they come last.
+  assert.match(found[3].message, /^Underfull/);
+  // A complete 79-column line followed by latexmk's own output is not joined to it.
+  const exact = "x".repeat(79);
+  assert.deepEqual(diagnostics(`${exact}\nLatexmk: done\n./a.tex:1: Oops`), [
+    { severity: "error", path: "a.tex", line: 1, message: "Oops" },
+  ]);
+});
+test("only the last LaTeX pass reports problems", () => {
+  const log = [
+    "Run number 1 of rule 'pdflatex'",
+    "LaTeX Warning: Citation `smith2020' on page 1 undefined on input line 4.",
+    "LaTeX Warning: There were undefined references.",
+    "Run number 1 of rule 'bibtex main'",
+    "Run number 2 of rule 'pdflatex'",
+    String.raw`Overfull \hbox (6.0pt too wide) in paragraph at lines 9--10`,
+  ].join("\n");
+  assert.deepEqual(
+    diagnostics(log).map((d) => d.message),
+    [String.raw`Overfull \hbox (6.0pt too wide) in paragraph at lines 9--10`],
+  );
+  // Without latexmk's markers (an up-to-date build, or plain output) everything counts.
+  assert.equal(diagnostics(log.replace(/^Run number.*$/gm, "")).length, 3);
+});
 test("templates with extra document classes still compile main.tex", () => {
   // An Elsevier template: the paper plus a separate highlights page.
   assert.equal(mainDocument(["highlights.tex", "main.tex"]), "main.tex");

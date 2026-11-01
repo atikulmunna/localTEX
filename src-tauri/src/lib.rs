@@ -718,6 +718,8 @@ fn launch_build(
         cmd.arg("-g");
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A PDF written after this point comes from this build, even if LaTeX reported errors.
+    let launched = SystemTime::now();
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Could not start latexmk: {e}. Open Settings → LaTeX setup."))?;
@@ -751,7 +753,7 @@ fn launch_build(
         let err = compiler::stream(stderr, app.clone(), project_id.clone(), build_id.clone());
         let start = std::time::Instant::now();
         let mut timed_out = false;
-        let success = loop {
+        let clean = loop {
             if start.elapsed() > Duration::from_secs(300) {
                 timed_out = true;
                 job.terminate();
@@ -774,7 +776,12 @@ fn launch_build(
             .unwrap_or_default()
             .to_string_lossy();
         let pdf = build_dir.join(format!("{stem}.pdf"));
-        let mut success = success && !cancelled && !timed_out && pdf.exists();
+        // latexmk exits with an error whenever LaTeX reported one, but with -f it still
+        // writes the PDF for recoverable errors. Show that PDF; the log lists the errors.
+        let fresh = fs::metadata(&pdf)
+            .and_then(|m| m.modified())
+            .is_ok_and(|modified| modified >= launched);
+        let mut success = (clean || fresh) && !cancelled && !timed_out && pdf.exists();
         let state = app.state::<AppState>();
         if success {
             let snapshot = build_dir.join(format!(
@@ -819,8 +826,10 @@ fn launch_build(
                 "Build cancelled"
             } else if timed_out {
                 "Build timed out after five minutes"
-            } else if success {
+            } else if success && clean {
                 "PDF is up to date"
+            } else if success {
+                "PDF updated. LaTeX reported errors."
             } else {
                 "Build failed. Review the compiler output."
             },

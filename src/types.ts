@@ -100,6 +100,8 @@ export interface Diagnostic {
   message: string;
   path?: string;
   line?: number;
+  /** Raised while reading the bibliography LaTeX generates from the project's .bib file. */
+  bibliography?: boolean;
 }
 export interface OutlineItem {
   title: string;

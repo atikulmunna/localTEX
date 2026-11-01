@@ -158,6 +158,8 @@ export default function App() {
   const modalRef = useRef(modal);
   modalRef.current = modal;
   const [mainChoice, setMainChoice] = useState("");
+  // Errors in the last build, so a PDF with the same errors doesn't reopen Problems.
+  const buildErrors = useRef(0);
   const [newName, setNewName] = useState("Untitled research");
   const [template, setTemplate] = useState<"article" | "thesis">("article");
   const [fileName, setFileName] = useState("");
@@ -257,6 +259,7 @@ export default function App() {
     (b) => b.text !== b.savedText,
   );
   const issues = useMemo(() => diagnostics(log), [log]);
+  const errorCount = issues.filter((i) => i.severity === "error").length;
   const missing = useMemo(() => missingFiles(log), [log]);
   const sections = useMemo(() => outline(documents), [documents]);
   const results = useMemo(
@@ -565,6 +568,7 @@ export default function App() {
       logRef.current = "";
       setBuildStatus("idle");
       buildRoot.current = null;
+      buildErrors.current = 0;
       setRecovery([]);
       const next = {
         ...settings,
@@ -804,7 +808,16 @@ export default function App() {
             ? "cancelled"
             : "failed",
       );
+      const errors = diagnostics(logRef.current).filter(
+        (d) => d.severity === "error",
+      ).length;
       if (event.success) {
+        // A PDF can come with errors LaTeX recovered from. Show them once, not after
+        // every automatic build while they're being fixed.
+        if (errors && !buildErrors.current) {
+          setShowOutput(true);
+          setOutputTab("issues");
+        }
         try {
           setPdf(await api.pdf(event.projectId));
           setPdfStale(editSerial.current !== buildSerial.current);
@@ -816,6 +829,7 @@ export default function App() {
         setShowOutput(true);
         if (!diagnostics(logRef.current).length) setOutputTab("log");
       }
+      buildErrors.current = errors;
       if (queued.current) {
         queued.current = false;
         void actions.current.build();
@@ -2107,9 +2121,13 @@ export default function App() {
                             className={`issue ${issue.severity}`}
                             key={i}
                             onClick={() => {
-                              const path = issue.path
-                                ? relativeSource(project.directory, issue.path)
-                                : buildRoot.current;
+                              const path = issue.bibliography
+                                ? (project.files.find((f) =>
+                                    f.path.endsWith(".bib"),
+                                  )?.path ?? null)
+                                : issue.path
+                                  ? relativeSource(project.directory, issue.path)
+                                  : buildRoot.current;
                               if (path) void openFile(path, issue.line ?? 1);
                             }}
                           >
@@ -2137,15 +2155,15 @@ export default function App() {
           </div>
           <footer className="statusbar">
             <button
-              className={`build-status ${buildStatus}`}
+              className={`build-status ${buildStatus}${buildStatus === "success" && errorCount ? " with-errors" : ""}`}
               onClick={() => setShowOutput((s) => !s)}
               title="Show build output"
             >
               {buildStatus === "running" ? (
                 <Loader2 className="spin" size={14} />
-              ) : buildStatus === "success" ? (
+              ) : buildStatus === "success" && !errorCount ? (
                 <CheckCircle2 size={14} />
-              ) : buildStatus === "failed" ? (
+              ) : buildStatus === "success" || buildStatus === "failed" ? (
                 <TriangleAlert size={14} />
               ) : (
                 <Terminal size={14} />
@@ -2156,7 +2174,9 @@ export default function App() {
                   : buildStatus === "success"
                     ? pdfStale
                       ? "Changes since last build"
-                      : "PDF is up to date"
+                      : errorCount
+                        ? `PDF updated with ${errorCount} ${errorCount === 1 ? "error" : "errors"}`
+                        : "PDF is up to date"
                     : buildStatus === "failed"
                       ? "Build failed. See problems"
                       : buildStatus === "cancelled"

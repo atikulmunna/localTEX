@@ -95,3 +95,34 @@ test("when the main document is unclear, Compile asks once and remembers", async
     page.getByRole("combobox", { name: "Root document" }),
   ).toHaveValue("response.tex");
 });
+
+test("a PDF built despite an error is shown, with that error listed first", async ({
+  page,
+}) => {
+  await installDesktopDouble(page);
+  await openProject(page);
+  await page.getByRole("button", { name: "Auto compile" }).click();
+  await page.getByRole("button", { name: /^Compile/ }).click();
+  await expect.poll(async () => (await recorded(page)).builds.length).toBe(1);
+  await page.evaluate(() => {
+    const ipc = (window as any).testIPC;
+    // The first pass can't resolve citations yet; the second one does.
+    ipc.output("Run number 1 of rule 'pdflatex'");
+    ipc.output("LaTeX Warning: Citation `joy2024novel' on page 3 undefined on input line 196.");
+    ipc.output("Run number 2 of rule 'pdflatex'");
+    ipc.output(String.raw`Underfull \hbox (badness 10000) in paragraph at lines 187--188`);
+    ipc.output("./.localtex/build/main.bbl:75: LaTeX Error: Unicode character ₂ (U+2082)");
+    ipc.output("               not set up for use with LaTeX.");
+    ipc.output("");
+    ipc.output("l.75 ...biosensor with dual-layer au/tio₂");
+    ipc.finish(true);
+  });
+  await expect(page.locator(".statusbar")).toContainText("PDF updated with 1 error");
+  const panel = page.getByRole("region", { name: "Build output" });
+  const issues = panel.locator(".issue");
+  await expect(issues).toHaveCount(2);
+  await expect(issues.first()).toContainText(
+    "In the bibliography: LaTeX Error: Unicode character ₂ (U+2082) not set up for use with LaTeX.",
+  );
+  await expect(panel).not.toContainText("joy2024novel");
+});

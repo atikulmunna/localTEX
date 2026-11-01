@@ -1639,6 +1639,9 @@ kbd {
 .build-status.failed {
   color: var(--danger);
 }
+.build-status.success.with-errors {
+  color: var(--warning);
+}
 .status-spacer {
   flex: 1;
 }

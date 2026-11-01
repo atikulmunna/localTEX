@@ -83,14 +83,15 @@ export async function installDesktopDouble(
           text,
         });
       },
-      finish() {
+      /** Ends the build; `pdf` means LaTeX wrote one, possibly despite errors. */
+      finish(pdf = false) {
         const build = this.builds.at(-1);
         this.emit("build-event", {
           projectId: "test",
           buildId: build.buildId,
           kind: "finished",
-          success: false,
-          text: "Build failed",
+          success: pdf,
+          text: pdf ? "PDF updated. LaTeX reported errors." : "Build failed",
         });
       },
       setup(event: object) {

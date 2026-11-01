@@ -60,20 +60,75 @@ export function searchProject(
   }
   return results;
 }
+/** latexmk's own lines, which TeX never wrapped, so nothing is joined onto them. */
+const messageStart = /^(?:Latexmk|Rule |Run number|-{6,})/;
+/**
+ * TeX wraps its terminal output at 79 columns, which splits long paths and messages.
+ * localTEX widens that where the engine allows; this rejoins what is still split. A
+ * message exactly 79 columns long is followed by an empty line, so it stays as it is.
+ */
+function unwrap(log: string): string[] {
+  const encoder = new TextEncoder();
+  const lines: string[] = [];
+  for (const raw of log.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    const previous = lines.at(-1);
+    const full = (text: string) =>
+      text.length === 79 || encoder.encode(text).length === 79;
+    if (previous !== undefined && full(previous.split("\u0000").at(-1)!) && line && !messageStart.test(line))
+      lines[lines.length - 1] = previous + "\u0000" + line;
+    else lines.push(line);
+  }
+  // The marker only remembers where the last piece began; it is not part of the text.
+  return lines.map((line) => line.replaceAll("\u0000", ""));
+}
+const sourceFile =
+  /^(.+?\.(?:tex|sty|cls|bbl|ltx|dtx|clo|def|cfg|fd|aux|toc|lof|lot|ind|gls|nls|tikz|pgf)):(\d+):\s*(.+)/;
+/** Errors first, then warnings, then the overfull and underfull boxes that rarely matter. */
+const rank = (d: Diagnostic) =>
+  d.severity === "error" ? 0 : /^(?:Over|Under)full /.test(d.message) ? 2 : 1;
 export function diagnostics(log: string): Diagnostic[] {
   const results: Diagnostic[] = [];
-  const lines = log.split("\n");
-  for (let i = 0; i < lines.length; i++) {
+  const lines = unwrap(log);
+  // latexmk runs LaTeX several times. Earlier passes warn about citations and references
+  // that the last pass resolves, so only the last pass (and anything after it) counts.
+  let start = 0;
+  lines.forEach((line, i) => {
+    if (/^Run number \d+ of rule '(?:pdf|xe|lua)?latex'/.test(line)) start = i;
+  });
+  for (let i = start; i < lines.length; i++) {
     const line = lines[i].trim();
-    const location = line.match(/^(.+?\.(?:tex|sty|cls)):(\d+):\s*(.+)/);
-    if (location)
-      results.push({
-        severity: "error",
-        path: location[1].replace(/^\.\//, "").replaceAll("\\", "/"),
-        line: Number(location[2]),
-        message: location[3],
-      });
-    else if (/^!\s/.test(line)) {
+    const location = line.match(sourceFile);
+    // TeX's closing notice that it stopped, which repeats the error above it.
+    if (location && /^==> Fatal error occurred/.test(location[3])) continue;
+    if (location) {
+      // LaTeX continues a long message on indented lines, up to a blank one.
+      let message = location[3];
+      for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+        if (!/^\s+\S/.test(lines[j])) break;
+        message += " " + lines[j].trim();
+      }
+      const path = location[1].replace(/^\.\//, "").replaceAll("\\", "/");
+      if (path.endsWith(".bbl")) {
+        // The .bbl is generated from the .bib file; quote the text so the entry can be found.
+        const context = lines
+          .slice(i + 1, i + 14)
+          .map((l) => l.match(/^l\.\d+\s+(.*\S)/)?.[1])
+          .find(Boolean)
+          ?.replace(/^\.\.\./, "");
+        results.push({
+          severity: "error",
+          bibliography: true,
+          message: `In the bibliography: ${message}${context ? ` Near “${context}”.` : ""}`,
+        });
+      } else
+        results.push({
+          severity: "error",
+          path,
+          line: Number(location[2]),
+          message,
+        });
+    } else if (/^!\s/.test(line)) {
       const nearby = lines
         .slice(i + 1, i + 6)
         .join("\n")
@@ -95,13 +150,15 @@ export function diagnostics(log: string): Diagnostic[] {
       });
     }
   }
-  return results.filter(
-    (v, i, a) =>
-      a.findIndex(
-        (x) =>
-          x.message === v.message && x.path === v.path && x.line === v.line,
-      ) === i,
-  );
+  return results
+    .filter(
+      (v, i, a) =>
+        a.findIndex(
+          (x) =>
+            x.message === v.message && x.path === v.path && x.line === v.line,
+        ) === i,
+    )
+    .sort((a, b) => rank(a) - rank(b));
 }
 // Only package-provided files can be installed; a missing chapter.tex is the author's to fix.
 const packageFile = /\.(?:sty|cls|def|fd|cfg|clo|bst|bbx|cbx|lbx|dbx|tfm)$/;
