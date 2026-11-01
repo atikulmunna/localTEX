@@ -173,6 +173,18 @@ function rootSource(root: string, documents: DocumentFile[], text?: string) {
     ...documents.filter((d) => parts.includes(d.path)).map((d) => d.text),
   ].join("\n");
 }
+/**
+ * The document to compile when several files start with \documentclass, as templates
+ * often ship extra ones (an Elsevier highlights.tex, standalone figures): main.tex,
+ * otherwise the only one at the top of the project. Null when that is still unclear.
+ */
+export function mainDocument(roots: string[]): string | null {
+  if (roots.length === 1) return roots[0];
+  const only = (list: string[]) => (list.length === 1 ? list[0] : null);
+  const top = roots.filter((r) => !r.includes("/"));
+  const main = roots.filter((r) => r.split("/").pop()?.toLowerCase() === "main.tex");
+  return only(main.filter((r) => top.includes(r))) ?? only(main) ?? only(top);
+}
 export function resolveBuild(
   project: Project,
   active?: DocumentFile,
@@ -198,7 +210,7 @@ export function resolveBuild(
   const root =
     project.config.root ??
     resolvedMagic ??
-    (project.roots.length === 1 ? project.roots[0] : null);
+    mainDocument(project.roots);
   const rootText =
     root === null
       ? undefined

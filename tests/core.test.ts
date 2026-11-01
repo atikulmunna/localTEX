@@ -5,6 +5,7 @@ import {
   detectEngine,
   diagnostics,
   foldEnd,
+  mainDocument,
   missingFiles,
   nonProse,
   requiredFiles,
@@ -134,10 +135,26 @@ test("project config overrides magic comments and engine defaults", () => {
 });
 test("ambiguous or missing root requires an explicit choice", () => {
   assert.equal(
-    resolveBuild({ ...project, roots: ["main.tex", "appendix.tex"] }).root,
+    resolveBuild({ ...project, roots: ["paper.tex", "response.tex"] }).root,
     null,
   );
   assert.equal(resolveBuild({ ...project, roots: [] }).root, null);
+});
+test("templates with extra document classes still compile main.tex", () => {
+  // An Elsevier template: the paper plus a separate highlights page.
+  assert.equal(mainDocument(["highlights.tex", "main.tex"]), "main.tex");
+  assert.equal(
+    resolveBuild({ ...project, roots: ["highlights.tex", "main.tex"] }).root,
+    "main.tex",
+  );
+  // A top-level main.tex wins over others; a nested one when it is the only main.tex.
+  assert.equal(mainDocument(["Main.tex", "old/main.tex"]), "Main.tex");
+  assert.equal(mainDocument(["paper/main.tex", "cover.tex"]), "paper/main.tex");
+  // Standalone figures in folders don't compete with the one top-level document.
+  assert.equal(mainDocument(["figures/plot.tex", "thesis.tex"]), "thesis.tex");
+  assert.equal(mainDocument(["a/main.tex", "b/main.tex"]), null);
+  assert.equal(mainDocument(["paper.tex", "response.tex"]), null);
+  assert.equal(mainDocument([]), null);
 });
 test("invalid engine magic comments never become process arguments", () => {
   assert.equal(

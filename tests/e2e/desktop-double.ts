@@ -10,6 +10,8 @@ export async function installDesktopDouble(
     text?: string;
     encoding?: string;
     engine?: string | null;
+    /** Files that start with \documentclass; given, no root is configured. */
+    roots?: string[];
   } = {},
 ) {
   await page.addInitScript((options) => {
@@ -30,18 +32,22 @@ export async function installDesktopDouble(
       id: "test",
       name: "Auto test",
       directory: "D:/Auto test",
-      roots: ["main.tex"],
+      roots: options.roots ?? ["main.tex"],
       folders: ["figures"],
       files: [
         { path: "figures/plot.png", size: 68, editable: false },
         ...(options.latexmkrc
           ? [{ path: "latexmkrc", size: 40, editable: true }]
           : []),
-        { path: "main.tex", size: 80, editable: true },
+        ...(options.roots ?? ["main.tex"]).map((path) => ({
+          path,
+          size: 80,
+          editable: true,
+        })),
       ],
       config: {
         version: 1,
-        root: "main.tex",
+        root: options.roots ? null : "main.tex",
         engine: options.engine === undefined ? "pdflatex" : options.engine,
         shellEscape: false,
         latexmkrc: false,
@@ -127,7 +133,7 @@ export async function installDesktopDouble(
           return project;
         if (command === "index_project") return [{ ...document }];
         if (command === "load_drafts") return [];
-        if (command === "read_file") return { ...document };
+        if (command === "read_file") return { ...document, path: args.path };
         if (command === "save_file") {
           if (w.testIPC.conflict)
             throw new Error("CONFLICT: external file changed");

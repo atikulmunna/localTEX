@@ -152,10 +152,12 @@ export default function App() {
     | "help"
     | "setup"
     | "folder"
+    | "main"
     | null
   >(null);
   const modalRef = useRef(modal);
   modalRef.current = modal;
+  const [mainChoice, setMainChoice] = useState("");
   const [newName, setNewName] = useState("Untitled research");
   const [template, setTemplate] = useState<"article" | "thesis">("article");
   const [fileName, setFileName] = useState("");
@@ -272,6 +274,14 @@ export default function App() {
         currentDocs(),
       ).engine
     : "pdflatex";
+  // Likewise the document "Auto" compiles, if it can tell.
+  const autoRoot = project
+    ? resolveBuild(
+        { ...project, config: { ...project.config, root: null } },
+        buffer,
+        currentDocs(),
+      ).root
+    : null;
   // The cursor's line, so the toolbar can show whether it is a heading.
   const currentLine = (() => {
     const doc = buffer ? editor.current?.state.doc : undefined;
@@ -719,8 +729,16 @@ export default function App() {
         currentDocs(),
       );
       if (!options.root) {
-        setModal("settings");
-        notify("Choose a root document in Project settings before compiling.");
+        // Ask which file to compile; typing with auto compile on never opens a dialog.
+        if (!automatic) {
+          const choices = mainChoices(p);
+          setMainChoice(
+            choices.includes(activeRef.current)
+              ? activeRef.current
+              : (choices[0] ?? ""),
+          );
+          setModal("main");
+        }
         return;
       }
       if (setupRef.current.status === "running") {
@@ -870,6 +888,18 @@ export default function App() {
     b.conflict = undefined;
     setDirtyVersion((v) => v + 1);
     refreshIndex();
+  }
+  /** Files offered when localTEX can't tell which document to compile. */
+  function mainChoices(p: Project) {
+    return p.roots.length
+      ? p.roots
+      : p.files.filter((f) => f.path.endsWith(".tex")).map((f) => f.path);
+  }
+  async function compileMain() {
+    if (!mainChoice) return;
+    setModal(null);
+    await saveConfig({ root: mainChoice });
+    void build();
   }
   async function saveConfig(change: Partial<ProjectConfig>) {
     if (!project) return;
@@ -2311,6 +2341,52 @@ export default function App() {
           </form>
         </Modal>
       )}
+      {modal === "main" && project && (
+        <Modal title="Choose the main document" onClose={() => setModal(null)}>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void compileMain();
+            }}
+          >
+            <p className="modal-intro">
+              {project.roots.length > 1
+                ? "Several files in this project start with \\documentclass. Choose the one to compile; localTEX remembers it for this project."
+                : mainChoices(project).length
+                  ? "No file in this project starts with \\documentclass, so localTEX can’t tell which one to compile. Choose it here; localTEX remembers it for this project."
+                  : "This project has no .tex files to compile yet."}
+            </p>
+            <div className="main-choices">
+              {mainChoices(project).map((path) => (
+                <label
+                  key={path}
+                  className={mainChoice === path ? "selected" : ""}
+                >
+                  <input
+                    type="radio"
+                    name="main-document"
+                    value={path}
+                    checked={mainChoice === path}
+                    onChange={() => setMainChoice(path)}
+                  />
+                  <FileText size={18} />
+                  <span>{path}</span>
+                </label>
+              ))}
+            </div>
+            <div className="modal-footer">
+              <span>You can change this later in Settings.</span>
+              <button
+                className="button primary"
+                type="submit"
+                disabled={!mainChoice}
+              >
+                Compile
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
       {modal === "settings" && (
         <Modal title="Settings" wide onClose={() => setModal(null)}>
           <div className="settings-body">
@@ -2392,7 +2468,11 @@ export default function App() {
                       void saveConfig({ root: e.target.value || null })
                     }
                   >
-                    <option value="">Auto-detect / magic comment</option>
+                    <option value="">
+                      {autoRoot
+                        ? `Auto (${autoRoot})`
+                        : "Auto (ask when compiling)"}
+                    </option>
                     {project.files
                       .filter((f) => f.path.endsWith(".tex"))
                       .map((f) => (
