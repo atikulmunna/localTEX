@@ -53,6 +53,7 @@ export async function installDesktopDouble(
       setups: [],
       configs: [],
       fileOps: [],
+      spellChecks: [],
       conflict: false,
       setupStatus: {
         complete: options.setupComplete ?? true,
@@ -143,6 +144,20 @@ export async function installDesktopDouble(
             : undefined;
         }
         if (command === "plugin:dialog|open") return ["C:/Pictures/chart.png"];
+        // A spell checker that knows one misspelling, "teh".
+        if (command === "spelling_languages") return ["en-US", "bn-BD"];
+        if (command === "check_spelling") {
+          w.testIPC.spellChecks.push(args);
+          return [...args.text.matchAll(/\bteh\b/g)].map((m: RegExpMatchArray) => ({
+            from: m.index,
+            to: m.index! + 3,
+          }));
+        }
+        if (command === "spelling_suggestions") return ["the", "ten"];
+        if (command === "add_to_dictionary") {
+          w.testIPC.fileOps.push({ command, ...args });
+          return;
+        }
         if (command === "read_binary") {
           // A real 1 x 1 PNG, so the preview's <img> can load it.
           const png = atob(
@@ -165,5 +180,6 @@ export const recorded = (page: Page) =>
       setups: t.setups as Record<string, any>[],
       configs: t.configs as Record<string, any>[],
       fileOps: t.fileOps as Record<string, any>[],
+      spellChecks: t.spellChecks as { language: string; text: string }[],
     };
   });

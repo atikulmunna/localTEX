@@ -2,8 +2,8 @@ import { test, expect, type Page } from "@playwright/test";
 import { installDesktopDouble, recorded } from "./desktop-double";
 
 // Overleaf-style editing comforts, through the desktop IPC double.
-async function openProject(page: Page) {
-  await installDesktopDouble(page);
+async function openProject(page: Page, text?: string) {
+  await installDesktopDouble(page, { text });
   await page.goto("/");
   await page.getByRole("button").filter({ hasText: "Auto test" }).click();
   await page.getByRole("button", { name: "Auto compile" }).click();
@@ -30,20 +30,36 @@ test("Ctrl+B and Ctrl+I format text; Ctrl+Shift+B toggles the sidebar", async ({
   await expect(page.locator(".sidebar")).toBeHidden();
 });
 
-test("spell checking skips LaTeX, and the status bar counts words", async ({
+test("spell checking underlines misspelled prose, offers fixes, and counts words", async ({
   page,
 }) => {
-  const editor = await openProject(page);
-  await expect(editor).toHaveAttribute("spellcheck", "true");
-  // Commands are excluded from checking; the prose word is not.
-  const command = editor.getByText("\\documentclass");
-  await expect(command.locator("xpath=ancestor-or-self::*[@spellcheck][1]")).toHaveAttribute(
-    "spellcheck",
-    "false",
+  const editor = await openProject(
+    page,
+    String.raw`\documentclass{article}
+\begin{document}
+Hello teh world, see \ref{teh}.
+\end{document}`,
   );
-  await expect(page.locator(".statusbar")).toContainText("1 word");
+  // The whole file is checked on opening, not only words as they are typed.
+  const marked = editor.locator(".cm-misspelled");
+  await expect(marked).toHaveCount(1);
+  await expect(marked).toHaveText("teh");
+  // LaTeX never reaches the checker: commands and labels arrive as spaces.
+  const [check] = (await recorded(page)).spellChecks;
+  expect(check.language).toBe("en-US");
+  expect(check.text).not.toContain("documentclass");
+  expect(check.text).not.toContain("{teh}");
+  expect(check.text).toContain("Hello teh world");
+  await expect(page.locator(".statusbar")).toContainText("4 words");
+  await marked.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "the", exact: true }).click();
+  await expect(editor).toContainText("Hello the world");
+  await expect(marked).toHaveCount(0);
   await expect(page.locator(".cm-foldGutter")).toBeVisible();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(
+    page.getByRole("combobox", { name: "Spelling language" }),
+  ).toHaveValue("en-US");
   await page.getByRole("checkbox", { name: /Check spelling/ }).uncheck();
   await page.keyboard.press("Escape");
   await expect(editor).toHaveAttribute("spellcheck", "false");

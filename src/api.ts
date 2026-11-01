@@ -34,6 +34,18 @@ export const api = {
     invoke<void>("delete_entry", { projectId, path }),
   importFiles: (projectId: string, folder: string, sources: string[]) =>
     invoke<string[]>("import_files", { projectId, folder, sources }),
+  spellingLanguages: () => invoke<string[]>("spelling_languages"),
+  checkSpelling: async (language: string, text: string) =>
+    (
+      await invoke<{ from: number; to: number }[]>("check_spelling", {
+        language,
+        text,
+      })
+    ).map(({ from, to }): [number, number] => [from, to]),
+  spellingSuggestions: (language: string, word: string) =>
+    invoke<string[]>("spelling_suggestions", { language, word }),
+  addToDictionary: (language: string, word: string) =>
+    invoke<void>("add_to_dictionary", { language, word }),
   readBinary: async (projectId: string, path: string) =>
     new Uint8Array(await invoke<ArrayBuffer>("read_binary", { projectId, path })),
   config: (projectId: string, config: ProjectConfig) =>

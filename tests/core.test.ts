@@ -325,3 +325,14 @@ Last.
   assert.deepEqual(foldEnd(line, lines.length, 9), { line: 10, column: 5 });
   assert.equal(foldEnd(line, lines.length, 2), null);
 });
+test("command names that start like a shorter one still skip their argument", () => {
+  const text = String.raw`Text \includegraphics[width=3cm]{figures/plot.png} and \inputminted{python}{code.py}.`;
+  const skipped = nonProse(text).map(([from, to]) => text.slice(from, to));
+  assert.ok(skipped.includes(String.raw`\includegraphics[width=3cm]{figures/plot.png}`));
+  assert.ok(skipped.includes(String.raw`\inputminted{python}`));
+  // Text, and, plus the second argument of \inputminted: code, py.
+  assert.equal(
+    countWords("main.tex", [{ path: "main.tex", revision: "a", text }]),
+    4,
+  );
+});

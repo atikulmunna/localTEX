@@ -49,6 +49,7 @@ import { Modal } from "./Modal";
 import { SetupDialog } from "./Setup";
 import { FileTree, previewable } from "./FileTree";
 import { FilePreview } from "./FilePreview";
+import { EditorToolbar } from "./EditorToolbar";
 import {
   applySetupEvent,
   beginSetup,
@@ -96,6 +97,17 @@ const persist = (key: string, value: unknown) =>
   localStorage.setItem(`localtex.${key}`, JSON.stringify(value));
 const filename = (path: string) =>
   path.replaceAll("\\", "/").split("/").at(-1) ?? path;
+/** "bn-BD" becomes "Bangla (Bangladesh)", in the reader's own language. */
+const languageName = (tag: string) => {
+  try {
+    return (
+      new Intl.DisplayNames([navigator.language], { type: "language" }).of(tag) ??
+      tag
+    );
+  } catch {
+    return tag;
+  }
+};
 const engineNames: Record<Engine, string> = {
   pdflatex: "pdfLaTeX",
   xelatex: "XeLaTeX",
@@ -165,6 +177,30 @@ export default function App() {
   const [spellcheck, setSpellcheck] = useState(() =>
     readPreference("spellcheck", true),
   );
+  const [spellLanguage, setSpellLanguage] = useState(() =>
+    readPreference("spellLanguage", ""),
+  );
+  // Dictionaries installed in Windows, such as en-US or bn-BD.
+  const [spellLanguages, setSpellLanguages] = useState<string[]>([]);
+  const language = spellLanguages.includes(spellLanguage)
+    ? spellLanguage
+    : (spellLanguages.find(
+        (l) => l.toLowerCase() === navigator.language.toLowerCase(),
+      ) ??
+      spellLanguages.find((l) => l.startsWith("en")) ??
+      spellLanguages[0] ??
+      "");
+  const spelling = useMemo(
+    () =>
+      desktop && language
+        ? {
+            check: (text: string) => api.checkSpelling(language, text),
+            suggest: (word: string) => api.spellingSuggestions(language, word),
+            add: (word: string) => api.addToDictionary(language, word),
+          }
+        : null,
+    [language],
+  );
   const [setup, setSetupView] = useState<SetupView>(idleSetup);
   const setupRef = useRef(setup);
   // Setup streams many lines; apply them in batches instead of one render per line.
@@ -228,6 +264,11 @@ export default function App() {
         currentDocs(),
       ).engine
     : "pdflatex";
+  // The cursor's line, so the toolbar can show whether it is a heading.
+  const currentLine = (() => {
+    const doc = buffer ? editor.current?.state.doc : undefined;
+    return doc ? doc.line(Math.min(cursor.line, doc.lines)).text : "";
+  })();
   const rcFile = project?.files.find(
     (f) => f.path === "latexmkrc" || f.path === ".latexmkrc",
   )?.path;
@@ -1061,7 +1102,11 @@ export default function App() {
   useEffect(() => {
     persist("autoInstallPackages", autoInstall);
     persist("spellcheck", spellcheck);
-  }, [autoInstall, spellcheck]);
+    persist("spellLanguage", spellLanguage);
+  }, [autoInstall, spellcheck, spellLanguage]);
+  useEffect(() => {
+    if (desktop) void api.spellingLanguages().then(setSpellLanguages).catch(() => {});
+  }, []);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(""), 9000);
@@ -1799,6 +1844,12 @@ export default function App() {
                       <span>Jump to PDF</span>
                     </button>
                   </div>
+                  {buffer && active.endsWith(".tex") && (
+                    <EditorToolbar
+                      view={() => editor.current}
+                      line={currentLine}
+                    />
+                  )}
                   {buffer?.conflict && (
                     <div className="conflict-banner">
                       <TriangleAlert size={16} />
@@ -1826,6 +1877,7 @@ export default function App() {
                       initialText={buffer.text}
                       documents={documents}
                       spellcheck={spellcheck}
+                      spelling={spelling}
                       diagnostics={issues.filter((issue) =>
                         issue.path
                           ? relativeSource(project.directory, issue.path) ===
@@ -2251,6 +2303,21 @@ export default function App() {
                   onChange={(e) => setSpellcheck(e.target.checked)}
                 />
               </label>
+              {spellcheck && spellLanguages.length > 0 && (
+                <label className="field-label horizontal">
+                  <span>Spelling language</span>
+                  <select
+                    value={language}
+                    onChange={(e) => setSpellLanguage(e.target.value)}
+                  >
+                    {spellLanguages.map((tag) => (
+                      <option key={tag} value={tag}>
+                        {languageName(tag)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </section>
             {project && (
               <section>

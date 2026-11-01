@@ -2,7 +2,6 @@ import { useEffect, useRef } from "react";
 import {
   EditorState,
   Compartment,
-  EditorSelection,
   Prec,
   RangeSetBuilder,
 } from "@codemirror/state";
@@ -17,7 +16,6 @@ import {
   highlightActiveLineGutter,
   drawSelection,
   rectangularSelection,
-  type Command,
   type DecorationSet,
   type ViewUpdate,
 } from "@codemirror/view";
@@ -51,13 +49,15 @@ import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import { lintGutter, setDiagnostics } from "@codemirror/lint";
 import type { Diagnostic, DocumentFile } from "./types";
 import { foldEnd, nonProse, projectSymbols } from "./core";
+import { spellChecking, type SpellService } from "./spelling";
+import { toggleWrap } from "./formatting";
 
 const states = new Map<string, EditorState>();
 const scrollPositions = new Map<string, number>();
 // Compartments must have stable identity across editor unmounts and restored states.
 const completion = new Compartment();
 const updates = new Compartment();
-const spelling = new Compartment();
+const spellingCompartment = new Compartment();
 
 const latexFolding = foldService.of((state, from) => {
   const start = state.doc.lineAt(from);
@@ -68,44 +68,6 @@ const latexFolding = foldService.of((state, from) => {
   );
   return end ? { from: start.to, to: state.doc.line(end.line).from + end.column } : null;
 });
-
-/** Ctrl+B and Ctrl+I, as in Overleaf: wrap each selection, or unwrap it if already wrapped. */
-function wrapWith(command: string): Command {
-  const open = `\\${command}{`;
-  return (view) => {
-    const { state } = view;
-    view.dispatch(
-      state.changeByRange((range) => {
-        const wrapped =
-          state.sliceDoc(range.from - open.length, range.from) === open &&
-          state.sliceDoc(range.to, range.to + 1) === "}";
-        return wrapped
-          ? {
-              changes: [
-                { from: range.from - open.length, to: range.from },
-                { from: range.to, to: range.to + 1 },
-              ],
-              range: EditorSelection.range(
-                range.from - open.length,
-                range.to - open.length,
-              ),
-            }
-          : {
-              changes: [
-                { from: range.from, insert: open },
-                { from: range.to, insert: "}" },
-              ],
-              range: EditorSelection.range(
-                range.from + open.length,
-                range.to + open.length,
-              ),
-            };
-      }),
-      { scrollIntoView: true, userEvent: "input" },
-    );
-    return true;
-  };
-}
 
 // The system spell checker (Windows, through WebView2) checks the editor's text. LaTeX
 // commands, math, labels and paths are marked so it underlines only prose.
@@ -130,7 +92,8 @@ function proseMarks(view: EditorView, ranges: [number, number][]) {
       builder.add(from, to, notProse);
   return builder.finish();
 }
-const spellChecking = [
+// The browser preview has no Windows checker; there the browser's own one checks typing.
+const browserSpellChecking = [
   EditorView.contentAttributes.of({ spellcheck: "true" }),
   ViewPlugin.fromClass(
     class {
@@ -283,10 +246,14 @@ const theme = EditorView.theme({
     padding: "0 7px",
     margin: "0 4px",
   },
+  // The selection is drawn behind the text, so the current line's tint must stay
+  // translucent or it hides the selection.
   ".cm-activeLine": { backgroundColor: "var(--active-line)" },
   "&.cm-focused": { outline: "none" },
-  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection":
+  // As specific as CodeMirror's own rule, so these colours apply.
+  "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionLayer .cm-selectionBackground, .cm-content ::selection":
     { backgroundColor: "var(--selection)" },
+  ".cm-selectionMatch": { backgroundColor: "var(--selection-match)" },
   ".cm-cursor": { borderLeftColor: "var(--accent)" },
   ".cm-tooltip": {
     backgroundColor: "var(--raised)",
@@ -317,6 +284,8 @@ interface Props {
   documents: DocumentFile[];
   diagnostics: Diagnostic[];
   spellcheck: boolean;
+  /** The desktop spell checker; without it the browser's own checker is used. */
+  spelling: SpellService | null;
   onChange: (text: string) => void;
   onCursor: (line: number, column: number) => void;
   onReady: (view: EditorView | null) => void;
@@ -327,10 +296,19 @@ export function Editor({
   documents,
   diagnostics,
   spellcheck,
+  spelling,
   onChange,
   onCursor,
   onReady,
 }: Props) {
+  const spellService = useRef(spelling);
+  spellService.current = spelling;
+  const spellingMode = () =>
+    !spellcheck
+      ? EditorView.contentAttributes.of({ spellcheck: "false" })
+      : spelling
+        ? spellChecking(() => spellService.current)
+        : browserSpellChecking;
   const container = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const callbacks = useRef({ onChange, onCursor, onReady });
@@ -366,15 +344,12 @@ export function Editor({
         EditorView.contentAttributes.of({
           "aria-label": "LaTeX source editor",
         }),
-        spelling.of(
-          spellcheck
-            ? spellChecking
-            : EditorView.contentAttributes.of({ spellcheck: "false" }),
-        ),
+        spellingCompartment.of(spellingMode()),
         Prec.high(
           keymap.of([
-            { key: "Mod-b", run: wrapWith("textbf") },
-            { key: "Mod-i", run: wrapWith("textit") },
+            // As in Overleaf; pressing again on wrapped text unwraps it.
+            { key: "Mod-b", run: toggleWrap("\\textbf{") },
+            { key: "Mod-i", run: toggleWrap("\\textit{") },
           ]),
         ),
         keymap.of([
@@ -429,13 +404,11 @@ export function Editor({
   }, [documents, bufferKey]);
   useEffect(() => {
     view.current?.dispatch({
-      effects: spelling.reconfigure(
-        spellcheck
-          ? spellChecking
-          : EditorView.contentAttributes.of({ spellcheck: "false" }),
-      ),
+      effects: spellingCompartment.reconfigure(spellingMode()),
     });
-  }, [spellcheck, bufferKey]);
+    // A new language or checker starts a fresh check through the new extension.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spellcheck, spelling, bufferKey]);
   useEffect(()=>{
     const instance=view.current;if(!instance)return;
     instance.dispatch(setDiagnostics(instance.state, diagnostics.filter(d=>d.line&&d.line<=instance.state.doc.lines).map(d=>{

@@ -1,4 +1,5 @@
 mod compiler;
+mod spelling;
 use localtex_core::{paths, process_job, setup, templates, workspace};
 
 use compiler::{ActiveBuild, Installer, ToolStatus};
@@ -547,6 +548,30 @@ fn cancel_setup(state: State<'_, AppState>) -> Result<()> {
     Ok(())
 }
 #[tauri::command]
+async fn spelling_languages() -> Result<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(spelling::languages)
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn check_spelling(language: String, text: String) -> Result<Vec<spelling::Misspelling>> {
+    tauri::async_runtime::spawn_blocking(move || spelling::check(&language, &text))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn spelling_suggestions(language: String, word: String) -> Result<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(move || spelling::suggest(&language, &word))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn add_to_dictionary(language: String, word: String) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || spelling::add(&language, &word))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
 async fn check_toolchain(directory: Option<String>) -> Result<Vec<ToolStatus>> {
     tauri::async_runtime::spawn_blocking(move || compiler::check_tools(directory))
         .await
@@ -952,6 +977,10 @@ pub fn run() {
             delete_entry,
             import_files,
             read_binary,
+            spelling_languages,
+            check_spelling,
+            spelling_suggestions,
+            add_to_dictionary,
             save_project_config,
             create_project,
             save_draft,

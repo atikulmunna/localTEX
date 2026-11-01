@@ -1,6 +1,7 @@
 // Run against a debug desktop instance started with a loopback WebView2 debug port.
 import {chromium} from '@playwright/test';
 import assert from 'node:assert/strict';
+import {existsSync} from 'node:fs';
 import {mkdir,readFile,rm,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 
@@ -44,6 +45,20 @@ assert.equal(latin1.encoding,'Windows-1252');assert.equal(latin1.text,'Café\n')
 await invoke('save_file',{projectId:project.id,document:{...latin1,text:latin1.text+'Naïve\n'}});
 assert.deepEqual([...await readFile(join(directory,'latin1.tex'))],[0x43,0x61,0x66,0xe9,0x0d,0x0a,0x4e,0x61,0xef,0x76,0x65,0x0d,0x0a]);
 const indexed=await invoke('index_project',{projectId:project.id});assert.ok(indexed.some(d=>d.path==='renamed notes.tex'));
+// Folders, added files (named so nothing is overwritten), previews and Recycle Bin deletes.
+await invoke('create_folder',{projectId:project.id,path:'figures'});
+const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==','base64');
+const outside=join(parent,`smoke-plot-${Date.now()}.png`);await writeFile(outside,png);
+const name=outside.split(/[\\/]/).at(-1);
+assert.deepEqual(await invoke('import_files',{projectId:project.id,folder:'figures',sources:[outside]}),[`figures/${name}`]);
+const copy=`figures/${name.replace('.png',' (2).png')}`;
+assert.deepEqual(await invoke('import_files',{projectId:project.id,folder:'figures',sources:[outside]}),[copy]);
+await rm(outside);
+const previewBytes=await page.evaluate(async({id,path})=>(await window.__TAURI_INTERNALS__.invoke('read_binary',{projectId:id,path})).byteLength,{id:project.id,path:`figures/${name}`});
+assert.equal(previewBytes,png.length);
+await invoke('delete_entry',{projectId:project.id,path:copy});
+assert.ok(!existsSync(join(directory,copy)));
+assert.ok((await invoke('refresh_project',{projectId:project.id})).folders.includes('figures'));
 // A copied project's config cannot grant shell execution or its latexmkrc without local consent.
 await writeFile(join(directory,'latexmkrc'),'print "localtex rc loaded\\n";\n','utf8');
 await writeFile(join(directory,'.localtex','project.json'),JSON.stringify({version:1,root:'main.tex',engine:'pdflatex',shellEscape:true,latexmkrc:true}),'utf8');
@@ -58,13 +73,38 @@ await page.getByRole('textbox',{name:'LaTeX source editor'}).waitFor();
 // A finished setup is remembered, so the reload must not show it again.
 assert.equal(await page.getByRole('dialog').count(),0);
 await page.getByRole('button',{name:/^Compile/}).click();
-await page.locator('.pdf-page canvas').waitFor({timeout:5*60_000});
+await page.locator('.pdf-page canvas').first().waitFor({timeout:5*60_000});
 await page.getByText('PDF is up to date').waitFor();
+assert.match(await page.locator('.page-count').innerText(),/^1 \/ \d+$/);
 await page.screenshot({path:'.cache/native-workspace.png'});
 await page.locator('.build-status').click();
 await page.getByRole('button',{name:'Compiler output',exact:true}).click();
 assert.match(await page.locator('.compiler-log').innerText(),/localtex rc loaded/);
-console.log('Native smoke passed: first-launch LaTeX setup, remembered setup, project creation/open, file read/save/conflict, traversal rejection, rename, settings, recovery, indexing, local trust, UI project loading, CRLF/BOM-preserving saves, Windows-1252 files, trusted latexmkrc, and a real compile to PDF.');
+assert.match(await page.locator('.status-words').innerText(),/^\d+ words$/);
+// Images open as a preview; the page's content policy must allow the blob image.
+await page.locator('.file-tree').getByRole('button',{name,exact:true}).click();
+const image=page.getByRole('img',{name:`figures/${name}`});
+await image.waitFor();
+assert.equal(await image.evaluate(img=>img.complete&&img.naturalWidth),1);
+// Ctrl+B reaches the editor in WebView2, and the system spell checker runs on prose.
+await page.locator('.editor-tab',{hasText:'main.tex'}).getByRole('button').first().click();
+await page.getByRole('button',{name:'Auto compile'}).click();
+const editor=page.getByRole('textbox',{name:'LaTeX source editor'});
+await editor.click();await page.keyboard.press('Control+End');
+await page.keyboard.insertText('\nThsi sentense has mispelled wrds and \\documentclass stays clean.\nword');
+await page.keyboard.press('Control+Shift+ArrowLeft');await page.keyboard.press('Control+b');
+assert.match(await editor.innerText(),/\\textbf\{word\}/);
+// The Windows spell checker underlines the inserted prose, not the LaTeX command.
+const misspelled=page.locator('.cm-misspelled');
+await misspelled.filter({hasText:'Thsi'}).waitFor({timeout:15_000});
+const flagged=await misspelled.allInnerTexts();
+for(const word of ['Thsi','sentense','mispelled','wrds'])assert.ok(flagged.includes(word),`${word} not flagged: ${flagged}`);
+assert.ok(!flagged.some(w=>w.includes('documentclass')),`LaTeX flagged: ${flagged}`);
+await misspelled.filter({hasText:'Thsi'}).click({button:'right'});
+await page.getByRole('menuitem',{name:'This',exact:true}).click();
+assert.match(await editor.innerText(),/This sentense/);
+await page.locator('.cm-line',{hasText:'sentense'}).screenshot({path:'.cache/native-spellcheck.png'});
+console.log('Native smoke passed: first-launch LaTeX setup, remembered setup, project creation/open, file read/save/conflict, traversal rejection, rename, settings, recovery, indexing, local trust, UI project loading, CRLF/BOM-preserving saves, Windows-1252 files, folders, added files, image preview, Recycle Bin delete, trusted latexmkrc, Ctrl+B, word count, Windows spell checking with suggestions, and a real compile to PDF.');
 await browser.close();
 // The project exists only for this run; its Bangla name checks non-ASCII paths.
 await rm(directory,{recursive:true,force:true});
