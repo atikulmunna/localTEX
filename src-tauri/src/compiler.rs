@@ -1,6 +1,6 @@
 pub use localtex_core::process::{
     apply_path, check_tools, command, configure_latexmk, executable, is_miktex, kill_tree,
-    output_timeout, Installer, ToolStatus,
+    output_timeout, Installer, Quality, ToolStatus,
 };
 use localtex_core::process_job::ProcessJob;
 use serde::Serialize;

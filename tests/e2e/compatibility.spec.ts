@@ -126,3 +126,27 @@ test("a PDF built despite an error is shown, with that error listed first", asyn
   );
   await expect(panel).not.toContainText("joy2024novel");
 });
+
+test("previews compile quickly; export compiles once at full quality first", async ({
+  page,
+}) => {
+  await installDesktopDouble(page);
+  await openProject(page);
+  await page.getByRole("button", { name: "Auto compile" }).click();
+  await page.getByRole("button", { name: /^Compile/ }).click();
+  await expect.poll(async () => (await recorded(page)).builds.length).toBe(1);
+  expect((await recorded(page)).builds[0].finalQuality).toBe(false);
+  await page.evaluate(() => (window as any).testIPC.finish(true));
+  await expect(page.locator(".statusbar")).toContainText("PDF is up to date");
+  await page.getByRole("button", { name: "Export PDF" }).click();
+  await expect.poll(async () => (await recorded(page)).builds.length).toBe(2);
+  expect((await recorded(page)).builds[1].finalQuality).toBe(true);
+  // Nothing is written until that build has produced its PDF.
+  const exports = async () =>
+    (await recorded(page)).fileOps.filter((op) => op.command === "export_pdf");
+  expect(await exports()).toHaveLength(0);
+  await page.evaluate(() => (window as any).testIPC.finish(true));
+  await expect.poll(async () => (await exports())[0]?.destination).toBe(
+    "C:/Exports/paper.pdf",
+  );
+});

@@ -639,6 +639,8 @@ async fn test_compilation(
             false,
             installer,
             None,
+            // The same settings real builds use while editing.
+            compiler::Quality::Preview,
         )?;
         let (success, output) = compiler::output_timeout(cmd, Duration::from_secs(45))?;
         if success && temp.path().join("test.pdf").exists() {
@@ -660,10 +662,19 @@ async fn start_build(
     directory: Option<String>,
     force: bool,
     install: bool,
+    final_quality: bool,
 ) -> Result<()> {
     tauri::async_runtime::spawn_blocking(move || {
         launch_build(
-            app, project_id, build_id, document, engine, directory, force, install,
+            app,
+            project_id,
+            build_id,
+            document,
+            engine,
+            directory,
+            force,
+            install,
+            final_quality,
         )
     })
     .await
@@ -679,6 +690,7 @@ fn launch_build(
     directory: Option<String>,
     force: bool,
     install: bool,
+    final_quality: bool,
 ) -> Result<()> {
     let state = app.state::<AppState>();
     let root = root(&state, &project_id)?;
@@ -710,6 +722,12 @@ fn launch_build(
             rc_file(&root)
         } else {
             None
+        },
+        // Light compression while editing; Export asks for the normal compression.
+        if final_quality {
+            compiler::Quality::Final
+        } else {
+            compiler::Quality::Preview
         },
     )?;
     // -g reruns the engine without deleting auxiliary files or the last good PDF.

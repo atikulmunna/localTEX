@@ -80,6 +80,8 @@ export const api = {
     directory: string | null,
     force: boolean,
     install: boolean,
+    /** Normal PDF compression, for export; previews compress lightly to compile faster. */
+    finalQuality = false,
   ) =>
     invoke<void>("start_build", {
       projectId,
@@ -89,6 +91,7 @@ export const api = {
       directory,
       force,
       install,
+      finalQuality,
     }),
   cancel: (projectId: string) => invoke<void>("cancel_build", { projectId }),
   pdf: async (projectId: string) =>

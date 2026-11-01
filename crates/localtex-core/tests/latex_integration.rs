@@ -3,6 +3,7 @@ use localtex_core::{
     paths::{long_path, short_path, tool_path},
     process::{
         apply_path, command, configure_latexmk, executable, is_miktex, output_timeout, Installer,
+        Quality,
     },
 };
 use std::{fs, time::Duration};
@@ -44,6 +45,7 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
         false,
         installer,
         None,
+        Quality::Final,
     )
     .unwrap();
     let (success, log) = output_timeout(figure, Duration::from_secs(600)).unwrap();
@@ -57,6 +59,7 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
         false,
         installer,
         None,
+        Quality::Preview,
     )
     .unwrap();
     let (success, log) = output_timeout(main, Duration::from_secs(90)).unwrap();
@@ -116,6 +119,7 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
         false,
         installer,
         Some("latexmkrc"),
+        Quality::Preview,
     )
     .unwrap();
     let (success, log) = output_timeout(with_rc, Duration::from_secs(90)).unwrap();
@@ -133,6 +137,7 @@ This is a multi-file research paper. See Figure~\ref{fig:test}.
         false,
         installer,
         None,
+        Quality::Preview,
     )
     .unwrap();
     let (ok, result) = output_timeout(broken, Duration::from_secs(90)).unwrap();

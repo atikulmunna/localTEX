@@ -160,6 +160,8 @@ export default function App() {
   const [mainChoice, setMainChoice] = useState("");
   // Errors in the last build, so a PDF with the same errors doesn't reopen Problems.
   const buildErrors = useRef(0);
+  // Told when the running build finishes, with whether it produced a PDF (used by Export).
+  const buildDone = useRef<((pdf: boolean) => void) | null>(null);
   const [newName, setNewName] = useState("Untitled research");
   const [template, setTemplate] = useState<"article" | "thesis">("article");
   const [fileName, setFileName] = useState("");
@@ -243,7 +245,7 @@ export default function App() {
     draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null),
     autoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const actions = useRef({
-    build: async (_automatic = false, _install = false) => {},
+    build: async (_automatic = false, _install = false, _final = false) => false,
     setup: (_e: SetupEvent) => {},
     drop: async (_paths: string[]) => {},
     packages: async () => {},
@@ -709,19 +711,24 @@ export default function App() {
       );
     }, 400);
   }
-  async function build(automatic = false, install = false) {
+  /** Starts a build; resolves to whether it started. Previews compress the PDF lightly. */
+  async function build(
+    automatic = false,
+    install = false,
+    finalQuality = false,
+  ): Promise<boolean> {
     const p = projectRef.current;
-    if (!p) return;
+    if (!p) return false;
     if (!desktop) {
       notify(
         "Compilation runs locally in the Windows desktop app. This browser preview lets you explore the editor.",
       );
-      return;
+      return false;
     }
     if (buildId.current || startingBuild.current) {
       queued.current = true;
       notify("Your next build is queued.");
-      return;
+      return false;
     }
     startingBuild.current = true;
     queued.current = false;
@@ -743,7 +750,7 @@ export default function App() {
           );
           setModal("main");
         }
-        return;
+        return false;
       }
       if (setupRef.current.status === "running") {
         // Compiling now would race the package installs; run once setup finishes.
@@ -752,7 +759,7 @@ export default function App() {
           notify(
             "LaTeX setup is still running. Your build starts as soon as it finishes.",
           );
-        return;
+        return false;
       }
       if (packageFetch.current) await packageFetch.current;
       // Capture before asynchronous saving so edits made during the save mark the PDF stale.
@@ -777,13 +784,16 @@ export default function App() {
           buildStatus === "failed" ||
           buildStatus === "cancelled",
         install || downloadPackages,
+        finalQuality,
       );
+      return true;
     } catch (e) {
       buildId.current = null;
       setBuildStatus("failed");
       queued.current = false;
       if (automatic) setAutoCompile(false);
       notify(automatic ? `Auto compile paused: ${e}` : e);
+      return false;
     } finally {
       startingBuild.current = false;
     }
@@ -832,6 +842,9 @@ export default function App() {
             : "failed",
       );
       buildErrors.current = errors;
+      const done = buildDone.current;
+      buildDone.current = null;
+      done?.(event.success);
       if (queued.current) {
         queued.current = false;
         void actions.current.build();
@@ -990,10 +1003,29 @@ export default function App() {
         defaultPath: `${project.name}.pdf`,
         filters: [{ name: "PDF", extensions: ["pdf"] }],
       });
-      if (destination) {
-        await api.export(project.id, destination);
-        notify("PDF exported.");
+      if (!destination) return;
+      if (desktop) {
+        if (buildId.current || startingBuild.current) {
+          notify("Wait for the current build to finish, then export.");
+          return;
+        }
+        // The preview is compressed lightly so it compiles fast. Exporting compiles once
+        // more with normal compression, so the PDF you share is as small as usual.
+        notify("Preparing the PDF for export…");
+        const done = new Promise<boolean>((resolve) => {
+          buildDone.current = resolve;
+        });
+        if (!(await build(false, false, true))) {
+          buildDone.current = null;
+          return;
+        }
+        if (!(await done)) {
+          notify("The PDF couldn’t be built for export. See Problems.");
+          return;
+        }
       }
+      await api.export(project.id, destination);
+      notify("PDF exported.");
     } catch (e) {
       notify(e);
     }

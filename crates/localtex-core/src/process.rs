@@ -30,6 +30,16 @@ impl Installer {
         }
     }
 }
+/// How strongly the PDF is compressed. In documents with large images, recompressing
+/// every image at the engines' strongest level dominates compile time, on every pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quality {
+    /// Light compression while editing: several times faster with large images, at the
+    /// cost of a larger PDF.
+    Preview,
+    /// The engine's normal compression, for a PDF to share.
+    Final,
+}
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolStatus {
@@ -103,6 +113,7 @@ pub fn configure_latexmk(
     shell_escape: bool,
     installer: Installer,
     rc_file: Option<&str>,
+    quality: Quality,
 ) -> Result<Command> {
     if !ENGINES.contains(&engine) {
         return Err("Unsupported LaTeX engine.".into());
@@ -149,13 +160,36 @@ pub fn configure_latexmk(
     } else {
         " --max-print-line=10000"
     };
+    // Preview builds compress lightly. pdfTeX and LuaTeX take the level from code that
+    // latexmk runs before the document (its %P placeholder); XeTeX leaves compression to
+    // xdvipdfmx, whose command gets -z 1. The PDF's name and SyncTeX data don't change.
+    let pretex = match (quality, engine) {
+        (Quality::Preview, "pdflatex") => Some(r"\pdfcompresslevel=1"),
+        (Quality::Preview, "lualatex") => Some(r"\pdfvariable compresslevel=1"),
+        _ => None,
+    };
+    if quality == Quality::Preview && engine == "xelatex" {
+        cmd.arg("-e")
+            .arg("$xdvipdfmx = q/xdvipdfmx -z 1 -E -o %D %O %S/");
+    }
+    let source = if pretex.is_some() { "%P" } else { "%S" };
     match installer {
-        Installer::Disabled => {
-            cmd.arg(format!("-{engine}={engine}{wide} --disable-installer %O %S"))
-        }
-        Installer::Enabled => cmd.arg(format!("-{engine}={engine}{wide} --enable-installer %O %S")),
+        Installer::Disabled => cmd.arg(format!(
+            "-{engine}={engine}{wide} --disable-installer %O {source}"
+        )),
+        Installer::Enabled => cmd.arg(format!(
+            "-{engine}={engine}{wide} --enable-installer %O {source}"
+        )),
         Installer::Unsupported => &mut cmd,
     };
+    if let Some(code) = pretex {
+        // latexmk's own engine commands (TeX Live) switch to %P with -usepretex.
+        cmd.arg(if installer == Installer::Unsupported {
+            format!("-usepretex={code}")
+        } else {
+            format!("-pretex={code}")
+        });
+    }
     if let Some(output) = output {
         cmd.arg(format!("-outdir={output}"));
     }
@@ -619,44 +653,65 @@ mod tests {
         assert_eq!(Installer::new(false, true), Installer::Unsupported);
         assert_eq!(Installer::new(true, false), Installer::Disabled);
         assert_eq!(Installer::new(true, true), Installer::Enabled);
-        let command = configure_latexmk(
-            &None,
-            "pdflatex",
-            Path::new("."),
-            "main.tex",
-            None,
-            false,
-            Installer::Enabled,
-            Some("latexmkrc"),
-        )
-        .unwrap();
-        let args: Vec<_> = command
+        let args = |engine, installer, rc, quality| -> Vec<String> {
+            configure_latexmk(
+                &None,
+                engine,
+                Path::new("."),
+                "main.tex",
+                None,
+                false,
+                installer,
+                rc,
+                quality,
+            )
+            .unwrap()
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        assert!(args.contains(
-            &"-pdflatex=pdflatex --max-print-line=10000 --enable-installer %O %S".into()
+            .collect()
+        };
+        let has = |args: &[String], arg: &str| args.iter().any(|a| a == arg);
+        let pdf = args(
+            "pdflatex",
+            Installer::Enabled,
+            Some("latexmkrc"),
+            Quality::Final,
+        );
+        assert!(has(
+            &pdf,
+            "-pdflatex=pdflatex --max-print-line=10000 --enable-installer %O %S"
         ));
         // Only the trusted project rc is read, and localTEX's options come after it.
-        assert_eq!(args[..4], ["-norc", "-r", "./latexmkrc", "-pdf"]);
-        // Errors don't stop the build; MiKTeX's LuaTeX gets no width option it would reject.
-        assert!(args.contains(&"-f".into()) && !args.contains(&"-halt-on-error".into()));
+        assert_eq!(pdf[..4], ["-norc", "-r", "./latexmkrc", "-pdf"]);
+        // Errors don't stop the build.
+        assert!(has(&pdf, "-f") && !has(&pdf, "-halt-on-error"));
         // Restricted mode (EPS conversion and similar safe helpers) unless shell escape is trusted.
-        assert!(args.contains(&"-latexoption=-shell-restricted".into()));
-        let lua: Vec<_> = configure_latexmk(
-            &None,
-            "lualatex",
-            Path::new("."),
-            "main.tex",
-            None,
-            false,
-            Installer::Disabled,
-            None,
-        )
-        .unwrap()
-        .get_args()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
-        assert!(lua.contains(&"-lualatex=lualatex --disable-installer %O %S".into()));
+        assert!(has(&pdf, "-latexoption=-shell-restricted"));
+        // A final build compresses normally; no code runs before the document.
+        assert!(!pdf.iter().any(|a| a.contains("pretex") || a == "-e"));
+        // MiKTeX's LuaTeX gets no width option it would reject.
+        let lua = args("lualatex", Installer::Disabled, None, Quality::Final);
+        assert!(has(&lua, "-lualatex=lualatex --disable-installer %O %S"));
+
+        // Previews compress lightly, each engine in its own way.
+        let pdf = args("pdflatex", Installer::Disabled, None, Quality::Preview);
+        assert!(has(
+            &pdf,
+            "-pdflatex=pdflatex --max-print-line=10000 --disable-installer %O %P"
+        ));
+        assert!(has(&pdf, r"-pretex=\pdfcompresslevel=1"));
+        let lua = args("lualatex", Installer::Enabled, None, Quality::Preview);
+        assert!(has(&lua, "-lualatex=lualatex --enable-installer %O %P"));
+        assert!(has(&lua, r"-pretex=\pdfvariable compresslevel=1"));
+        let xe = args("xelatex", Installer::Enabled, None, Quality::Preview);
+        assert!(has(&xe, "$xdvipdfmx = q/xdvipdfmx -z 1 -E -o %D %O %S/"));
+        assert!(has(
+            &xe,
+            "-xelatex=xelatex --max-print-line=10000 --enable-installer %O %S"
+        ));
+        // TeX Live keeps latexmk's own engine commands, switched to the pre-document code.
+        let live = args("pdflatex", Installer::Unsupported, None, Quality::Preview);
+        assert!(has(&live, r"-usepretex=\pdfcompresslevel=1"));
+        assert!(!live.iter().any(|a| a.starts_with("-pdflatex=")));
     }
 }

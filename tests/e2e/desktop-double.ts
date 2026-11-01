@@ -154,6 +154,11 @@ export async function installDesktopDouble(
             : undefined;
         }
         if (command === "plugin:dialog|open") return ["C:/Pictures/chart.png"];
+        if (command === "plugin:dialog|save") return "C:/Exports/paper.pdf";
+        if (command === "export_pdf") {
+          w.testIPC.fileOps.push({ command, ...args });
+          return;
+        }
         // A spell checker that knows one misspelling, "teh".
         if (command === "spelling_languages") return ["en-US", "bn-BD"];
         if (command === "check_spelling") {
