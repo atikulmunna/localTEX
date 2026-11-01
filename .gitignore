@@ -22,3 +22,6 @@ tasks.md
 # Windows folder metadata
 desktop.ini
 Thumbs.db
+
+# Local-only release checklist
+VALIDATION.md

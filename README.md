@@ -2,6 +2,8 @@
 
 A LaTeX editor for Windows that runs entirely on your own computer. Write on the left, see the PDF on the right, and keep your work in ordinary folders that any other LaTeX editor can open.
 
+![localTEX with a paper open: the file list, the editor with its formatting toolbar, and the compiled PDF beside it](docs/localtex-workspace.png)
+
 - **Overleaf-style writing:** a formatting toolbar, live PDF preview, spell check, word count, and jumping between source and PDF.
 - **No account and no cloud.** Your files never leave your PC. localTEX only goes online to download LaTeX packages.
 - **Packages handled for you.** When a document uses a package you don't have, localTEX downloads it before compiling.
@@ -32,7 +34,7 @@ localTEX runs on Windows 10 and 11 (64-bit). You'll need an internet connection 
 
 ### Step 3: Install localTEX
 
-1. Run the localTEX installer, a file named like `localTEX_0.1.0_x64-setup.exe`.
+1. Download `localTEX_<version>_x64-setup.exe` from the [latest release](https://github.com/atikulmunna/localTEX/releases/latest) and run it.
 2. Windows may show **"Windows protected your PC"**, because the installer isn't digitally signed yet. Click **More info**, then **Run anyway**.
 3. localTEX installs for your Windows account only, so it doesn't need administrator rights. It adds a Start menu entry and a desktop shortcut.
 
@@ -140,7 +142,7 @@ Open **Windows Settings → Apps → Installed apps**, find **localTEX**, and ch
 
 ## For developers
 
-**Status:** the unit, interface and Rust tests pass, the real-engine tests pass with MiKTeX 26.5 for pdfLaTeX, XeLaTeX and LuaLaTeX, and first-launch setup has been run against a real MiKTeX installation. Installation on a clean machine still needs the checks in [VALIDATION.md](VALIDATION.md).
+**Status:** the unit, interface and Rust tests pass, the real-engine tests pass with MiKTeX 26.5 for pdfLaTeX, XeLaTeX and LuaLaTeX, and first-launch setup has been run against a real MiKTeX installation. Installing, upgrading and uninstalling on a clean Windows machine hasn't been tested yet, and the installer isn't code-signed.
 
 ### Build from source
 
@@ -205,3 +207,7 @@ Missing packages are found with `findtexmf`, which only searches and never opens
 Each project's settings live in `.localtex/project.json` (version `1`, optional `root` and `engine`, a `shellEscape` flag, and `latexmkrc`), and build output in `.localtex/build/`. App settings and recovery drafts are stored in the application data folder for `app.localtex.studio`.
 
 References: [Tauri Windows packaging](https://v2.tauri.app/distribute/windows-installer/), [CodeMirror](https://codemirror.net/), [PDF.js](https://mozilla.github.io/pdf.js/) (pinned to 6.2.108), [latexmk](https://ctan.org/pkg/latexmk), [MiKTeX installer control](https://docs.miktex.org/manual/miktex-pdftex.html).
+
+## License
+
+localTEX is released under the [MIT License](LICENSE). MiKTeX, TeX Live and Strawberry Perl are separate projects with their own licenses.
