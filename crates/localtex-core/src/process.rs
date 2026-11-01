@@ -129,10 +129,13 @@ pub fn configure_latexmk(
         "-f",
         "-file-line-error",
         "-synctex=1",
+        // Without the user's consent, LaTeX gets the distributions' default restricted mode:
+        // only a fixed list of safe helpers, such as the converter that lets pdfLaTeX use
+        // EPS figures (common in IEEE and Elsevier templates). Arbitrary commands stay off.
         if shell_escape {
             "-latexoption=-shell-escape"
         } else {
-            "-latexoption=-no-shell-escape"
+            "-latexoption=-shell-restricted"
         },
     ]);
     // MiKTeX would otherwise show its own installation dialog mid-build. Downloads happen
@@ -638,6 +641,8 @@ mod tests {
         assert_eq!(args[..4], ["-norc", "-r", "./latexmkrc", "-pdf"]);
         // Errors don't stop the build; MiKTeX's LuaTeX gets no width option it would reject.
         assert!(args.contains(&"-f".into()) && !args.contains(&"-halt-on-error".into()));
+        // Restricted mode (EPS conversion and similar safe helpers) unless shell escape is trusted.
+        assert!(args.contains(&"-latexoption=-shell-restricted".into()));
         let lua: Vec<_> = configure_latexmk(
             &None,
             "lualatex",

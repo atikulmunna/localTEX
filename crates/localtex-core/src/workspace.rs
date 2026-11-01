@@ -139,6 +139,8 @@ const BUILD_OUTPUTS: &[&str] = &[
     ".xdv",
     ".dvi",
     ".thm",
+    // pdfLaTeX's conversion of an EPS figure, written beside the figure.
+    "-eps-converted-to.pdf",
 ];
 fn build_output(name: &str) -> bool {
     let name = name.to_lowercase();
@@ -459,6 +461,7 @@ mod tests {
             "main.synctex.gz",
             "main.fdb_latexmk",
             "main.bbl",
+            "logo-eps-converted-to.pdf",
         ] {
             fs::write(root.join(leftover), "").unwrap();
         }

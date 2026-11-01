@@ -799,15 +799,7 @@ export default function App() {
       return;
     }
     if (event.kind === "finished") {
-      buildId.current = null;
       setLog(logRef.current);
-      setBuildStatus(
-        event.success
-          ? "success"
-          : event.text.includes("cancelled")
-            ? "cancelled"
-            : "failed",
-      );
       const errors = diagnostics(logRef.current).filter(
         (d) => d.severity === "error",
       ).length;
@@ -829,6 +821,16 @@ export default function App() {
         setShowOutput(true);
         if (!diagnostics(logRef.current).length) setOutputTab("log");
       }
+      // Only now, once a large PDF has loaded, so the status doesn't flash "Changes since
+      // last build" in between. A compile requested meanwhile was queued and starts below.
+      buildId.current = null;
+      setBuildStatus(
+        event.success
+          ? "success"
+          : event.text.includes("cancelled")
+            ? "cancelled"
+            : "failed",
+      );
       buildErrors.current = errors;
       if (queued.current) {
         queued.current = false;
@@ -2522,8 +2524,10 @@ export default function App() {
                   <div>
                     <strong>Trust this project with shell escape</strong>
                     <p>
-                      Allows LaTeX to execute external programs on your
-                      computer.
+                      Allows LaTeX to run any program on your computer, as
+                      packages such as minted need. Without it, LaTeX runs
+                      only a short list of safe helpers, such as the EPS
+                      figure converter.
                     </p>
                   </div>
                   <input

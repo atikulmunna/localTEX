@@ -78,7 +78,8 @@ Click **Open folder** and choose the folder that contains your `.tex` files. Rec
 Click **Compile** (or press **Ctrl+Enter**). The PDF appears on the right and scrolls continuously through every page. With **Auto** on (the default), localTEX saves and recompiles about a second after you stop typing.
 
 - **Which file is compiled:** localTEX finds the file with `\documentclass`. If a project has several (an Elsevier template's `highlights.tex`, for example), it uses `main.tex`, and asks you only if it still can't tell. You can change it any time in **Settings → Project → Root document**, or with a `% !TeX root = main.tex` comment at the top of a file.
-- **Errors** show up in the editor next to the line and in the **Problems** panel below. If a build fails, the last good PDF stays visible, marked as a previous build.
+- **Errors** show up in the editor next to the line and in the **Problems** panel below, errors first. As in Overleaf, an error LaTeX can recover from (a character it can't print, for example) doesn't cost you the PDF: you get the PDF, and the status bar says how many errors to fix. An error in a bibliography entry says so and quotes the entry. If a build fails outright, the last good PDF stays visible, marked as a previous build.
+- **Figures** can be PNG, JPG or PDF, and EPS figures (common in IEEE and Elsevier templates) are converted automatically when you compile with pdfLaTeX. If figures appear as empty boxes with their file names, the document is using the `draft` class option; change it to `final`.
 - **Missing packages** are downloaded before compiling. The status bar shows **Getting packages…** while that happens.
 - **Export PDF** (above the preview) saves a copy of the PDF wherever you like. The working PDF lives in the project's hidden `.localtex` folder.
 
@@ -124,7 +125,7 @@ A localTEX project is an ordinary folder, so the same folder opens in TeXstudio,
 
 - Files keep their own line endings and encoding when saved, so they don't show every line as changed in git. Older projects saved in the Windows `latin1` / `ansinew` encoding open and save correctly; the status bar shows the encoding.
 - `% !TeX root` and `% !TeX program` comments work as they do in TeXstudio and VS Code.
-- Build leftovers from other editors (`.aux`, `.log`, `.synctex.gz` and similar) are hidden from the file list.
+- Build leftovers from other editors (`.aux`, `.log`, `.synctex.gz` and similar) and converted EPS figures (`-eps-converted-to.pdf`) are hidden from the file list.
 - Besides `.tex` and `.bib`, the editor opens style and class files (`.sty`, `.cls` and others), `latexmkrc`, and text formats such as `.txt`, `.md`, `.csv`, `.json` and `.yaml`.
 - A project's own `latexmkrc` (custom build rules for glossaries or nomenclature, for example) is used only after you allow it in **Settings → Project**, because such a file can run any program.
 
@@ -200,7 +201,7 @@ Both take an optional TeX folder as their first argument. Open a new terminal af
 - `crates/localtex-core/`: file safety, conflict-checked atomic writes, encodings, templates, compiler setup, package downloads, and Windows process handling. It is tested independently of the app.
 - `src-tauri/`: the desktop commands, file watching, build events, recovery drafts, spell checking, and Windows packaging.
 
-Builds run `latexmk` with `-norc`, so no system, user or project rc file is loaded unless the user trusts the project's own `latexmkrc`; localTEX's output folder and safety options apply either way. Engines are limited to pdfLaTeX, XeLaTeX and LuaLaTeX. Shell escape needs the user's consent, recorded in app data, so copying a project's configuration can't grant it on another PC.
+Builds run `latexmk` with `-norc`, so no system, user or project rc file is loaded unless the user trusts the project's own `latexmkrc`; localTEX's output folder and safety options apply either way. Engines are limited to pdfLaTeX, XeLaTeX and LuaLaTeX. latexmk runs with `-f`, so LaTeX keeps going past recoverable errors (as on Overleaf); a PDF written during the build is shown even though latexmk exits with an error, and the Problems list reads only the last LaTeX pass. Without consent, LaTeX runs in the distributions' default restricted mode (`-shell-restricted`), which allows only a fixed list of safe helpers such as the EPS-to-PDF converter. Full shell escape needs the user's consent, recorded in app data, so copying a project's configuration can't grant it on another PC.
 
 Missing packages are found with `findtexmf`, which only searches and never opens MiKTeX's install prompt. Each one is fetched by compiling a tiny document that loads it with MiKTeX's installer allowed, so MiKTeX resolves the right package and its dependencies. Folders with non-ASCII names are compiled through their Windows short (8.3) names or an ASCII junction, because Perl and MiKTeX can't handle them otherwise; SyncTeX positions are translated back.
 
