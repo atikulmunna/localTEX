@@ -20,6 +20,7 @@ import {
   FolderOpen,
   Hash,
   Image,
+  ImageOff,
   ListTree,
   Loader2,
   LocateFixed,
@@ -61,6 +62,7 @@ import {
 import {
   countWords,
   diagnostics,
+  draftFigures,
   requiredFiles,
   missingFiles,
   outline,
@@ -160,6 +162,8 @@ export default function App() {
   const [mainChoice, setMainChoice] = useState("");
   // Errors in the last build, so a PDF with the same errors doesn't reopen Problems.
   const buildErrors = useRef(0);
+  // The draft-figures note was closed for this project, for people who want draft mode.
+  const [draftDismissed, setDraftDismissed] = useState(false);
   // Told when the running build finishes, with whether it produced a PDF (used by Export).
   const buildDone = useRef<((pdf: boolean) => void) | null>(null);
   const [newName, setNewName] = useState("Untitled research");
@@ -298,6 +302,12 @@ export default function App() {
   // The index refreshes shortly after typing pauses, so counting follows it.
   const words = useMemo(
     () => countWords(buildOptions.root, currentDocs()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [documents, buildOptions.root],
+  );
+  // A draft option makes LaTeX draw figures as empty boxes; the PDF pane says so.
+  const draft = useMemo(
+    () => draftFigures(buildOptions.root, currentDocs()),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [documents, buildOptions.root],
   );
@@ -542,6 +552,35 @@ export default function App() {
       notify(e);
     }
   }
+  /** Replaces the draft option with final through the editor (so Ctrl+Z undoes it), then compiles. */
+  async function showFigures() {
+    const target = draft;
+    if (!target) return;
+    if (activeRef.current !== target.path) {
+      await openFile(target.path);
+      // The editor switches documents on the next frames, as for jumping to a line.
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+    }
+    const view = editor.current;
+    if (
+      !view ||
+      activeRef.current !== target.path ||
+      view.state.sliceDoc(target.from, target.to) !== target.option
+    ) {
+      notify(
+        `Change ${target.option} to final in ${filename(target.path)}, line ${target.line}, then compile.`,
+      );
+      return;
+    }
+    view.dispatch({
+      changes: { from: target.from, to: target.to, insert: "final" },
+      selection: { anchor: target.from, head: target.from + "final".length },
+      scrollIntoView: true,
+    });
+    void build();
+  }
   function jumpToLine(line: number) {
     const view = editor.current;
     if (!view) return;
@@ -571,6 +610,7 @@ export default function App() {
       setBuildStatus("idle");
       buildRoot.current = null;
       buildErrors.current = 0;
+      setDraftDismissed(false);
       setRecovery([]);
       const next = {
         ...settings,
@@ -2080,6 +2120,32 @@ export default function App() {
                   sync={sync}
                   onInverse={(point) => void syncInverse(point)}
                   onExport={() => void exportPdf()}
+                  notice={
+                    draft && pdf && !draftDismissed ? (
+                      <div className="pdf-notice" role="status">
+                        <ImageOff size={17} />
+                        <span>
+                          Figures show as empty boxes because this document
+                          uses the <code>{draft.option}</code> option.
+                        </span>
+                        <button
+                          className="button secondary small"
+                          title={`Changes ${draft.option} to final in ${filename(draft.path)}, line ${draft.line}, and compiles`}
+                          onClick={() => void showFigures()}
+                        >
+                          Show figures
+                        </button>
+                        <button
+                          className="icon-button"
+                          aria-label="Keep draft mode"
+                          title="Keep draft mode"
+                          onClick={() => setDraftDismissed(true)}
+                        >
+                          <X size={15} />
+                        </button>
+                      </div>
+                    ) : null
+                  }
                 />
               </div>
               {showOutput && (

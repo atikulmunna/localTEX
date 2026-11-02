@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   getDocument,
   GlobalWorkerOptions,
@@ -25,6 +31,8 @@ interface Props {
   sync: SyncPoint | null;
   onInverse: (point: SyncPoint) => void;
   onExport?: () => void;
+  /** Shown between the toolbar and the pages, such as a note about how the PDF was built. */
+  notice?: ReactNode;
 }
 interface Size {
   width: number;
@@ -36,7 +44,14 @@ interface Anchor {
   fraction: number;
 }
 
-export function PdfPreview({ data, stale, sync, onInverse, onExport }: Props) {
+export function PdfPreview({
+  data,
+  stale,
+  sync,
+  onInverse,
+  onExport,
+  notice,
+}: Props) {
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [sizes, setSizes] = useState<Size[]>([]);
   const [page, setPage] = useState(1);
@@ -270,6 +285,7 @@ export function PdfPreview({ data, stale, sync, onInverse, onExport }: Props) {
           )}
         </div>
       </div>
+      {notice}
       <div className="pdf-scroll" ref={scroller} onScroll={onScroll}>
         {error ? (
           <div className="empty-state">

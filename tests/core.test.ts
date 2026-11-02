@@ -4,6 +4,7 @@ import {
   countWords,
   detectEngine,
   diagnostics,
+  draftFigures,
   foldEnd,
   mainDocument,
   missingFiles,
@@ -176,6 +177,47 @@ test("errors come first, including ones in the generated bibliography", () => {
   assert.deepEqual(diagnostics(`${exact}\nLatexmk: done\n./a.tex:1: Oops`), [
     { severity: "error", path: "a.tex", line: 1, message: "Oops" },
   ]);
+});
+test("finds the draft option that turns figures into empty boxes", () => {
+  const doc = (path: string, text: string) => ({ path, text, revision: "1" });
+  const body = "\n\\begin{document}\\end{document}";
+  const ieee = String.raw`\documentclass[journal, draft, twoside,web]{ieeecolor}` + body;
+  const found = draftFigures("jsen.tex", [doc("jsen.tex", ieee)]);
+  assert.deepEqual(found, {
+    path: "jsen.tex",
+    line: 1,
+    from: ieee.indexOf("draft"),
+    to: ieee.indexOf("draft") + 5,
+    option: "draft",
+  });
+  const check = (text: string, others: { path: string; text: string }[] = []) =>
+    draftFigures("main.tex", [doc("main.tex", text), ...others.map((o) => doc(o.path, o.text))]);
+  // IEEEtran's draftcls drafts the class only; figures still show.
+  assert.equal(check(String.raw`\documentclass[draftcls]{IEEEtran}` + body), null);
+  assert.equal(check(String.raw`\documentclass[final]{article}` + body), null);
+  // graphicx can override the class either way.
+  assert.equal(
+    check(String.raw`\documentclass[draft]{article}` + "\n" + String.raw`\usepackage[final]{graphicx}` + body),
+    null,
+  );
+  const own = String.raw`\documentclass{article}` + "\n" + String.raw`\usepackage[draft]{graphicx}` + body;
+  assert.deepEqual(
+    [check(own)?.line, own.slice(check(own)!.from, check(own)!.to)],
+    [2, "draft"],
+  );
+  // Commented-out options don't count, and comments don't shift positions.
+  const commented = String.raw`% \documentclass[draft]{article}` + "\n" + String.raw`\documentclass{article} % draft` + body;
+  assert.equal(check(commented), null);
+  const after = String.raw`\documentclass[draft]{article} % for review` + body;
+  assert.equal(after.slice(check(after)!.from, check(after)!.to), "draft");
+  // A preamble the root loads, and graphicx keys set directly.
+  const preamble = "\\usepackage{amsmath}\n\\setkeys{Gin}{draft=true}";
+  const split = check(String.raw`\documentclass{article}` + "\n\\input{preamble}" + body, [
+    { path: "preamble.tex", text: preamble },
+  ]);
+  assert.deepEqual([split?.path, split?.line, split?.option], ["preamble.tex", 2, "draft=true"]);
+  assert.equal(preamble.slice(split!.from, split!.to), "draft=true");
+  assert.equal(check(String.raw`\documentclass{article}` + body), null);
 });
 test("only the last LaTeX pass reports problems", () => {
   const log = [

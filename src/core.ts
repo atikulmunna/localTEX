@@ -211,9 +211,8 @@ export function detectEngine(text: string): Engine | null {
     return "xelatex";
   return null;
 }
-/** The root's text plus the project files it loads directly, such as a preamble.tex. */
-function rootSource(root: string, documents: DocumentFile[], text?: string) {
-  if (text === undefined) return "";
+/** Project files a root loads directly, such as a preamble.tex or its own .sty. */
+function loadedBy(root: string, documents: DocumentFile[], text: string) {
   const folder = root.split("/").slice(0, -1);
   const loaded = [
     ...withoutComments(text).matchAll(
@@ -225,10 +224,93 @@ function rootSource(root: string, documents: DocumentFile[], text?: string) {
       [...folder, file].join("/"),
     ),
   );
-  return [
-    text,
-    ...documents.filter((d) => parts.includes(d.path)).map((d) => d.text),
-  ].join("\n");
+  return documents.filter((d) => d.path !== root && parts.includes(d.path));
+}
+/** The root's text plus the project files it loads directly, such as a preamble.tex. */
+function rootSource(root: string, documents: DocumentFile[], text?: string) {
+  if (text === undefined) return "";
+  return [text, ...loadedBy(root, documents, text).map((d) => d.text)].join(
+    "\n",
+  );
+}
+/** Comments turned into spaces, so positions in the result match the original text. */
+const blankComments = (text: string) =>
+  text.replace(
+    /(^|[^\\])(%[^\n]*)/gm,
+    (_, before: string, comment: string) => before + " ".repeat(comment.length),
+  );
+/** Where a document turns on draft figures: the option's text and position in its file. */
+export interface DraftFigures {
+  path: string;
+  line: number;
+  from: number;
+  to: number;
+  /** The option as written, for example "draft". */
+  option: string;
+}
+/**
+ * Where LaTeX is told to draw figures as empty boxes with their file names: a draft class
+ * option (which graphicx follows) or a draft option for graphicx itself. A final option for
+ * graphicx overrides a draft class. Checks the root and the files it loads directly.
+ */
+export function draftFigures(
+  root: string | null,
+  documents: DocumentFile[],
+): DraftFigures | null {
+  const main = documents.find((d) => d.path === root);
+  if (!root || !main) return null;
+  let classDraft: DraftFigures | null = null;
+  let graphicsDraft: DraftFigures | null = null;
+  let graphicsFinal = false;
+  for (const doc of [main, ...loadedBy(root, documents, main.text)]) {
+    const text = blankComments(doc.text);
+    // Each option in a comma-separated list that starts at `start` in the file.
+    const options = (list: string, start: number) =>
+      [...list.matchAll(/[^,]+/g)]
+        .filter((m) => m[0].trim())
+        .map((m) => {
+          const option = m[0].trim();
+          const from = start + m.index! + m[0].indexOf(option);
+          return {
+            name: option.replace(/\s+/g, ""),
+            at: {
+              path: doc.path,
+              line: text.slice(0, from).split("\n").length,
+              from,
+              to: from + option.length,
+              option,
+            },
+          };
+        });
+    const documentClass = text.match(/\\documentclass\s*\[([^\]]*)\]/);
+    if (documentClass && !classDraft)
+      classDraft =
+        options(
+          documentClass[1],
+          documentClass.index! + documentClass[0].indexOf("[") + 1,
+        ).find((o) => o.name === "draft")?.at ?? null;
+    const graphics = [
+      ...[
+        ...text.matchAll(
+          /\\(?:usepackage|RequirePackage)\s*\[([^\]]*)\]\s*\{([^}]*)\}/g,
+        ),
+      ].map((m) => [m[1], m[2], m.index! + m[0].indexOf("[") + 1] as const),
+      ...[
+        ...text.matchAll(/\\PassOptionsToPackage\s*\{([^}]*)\}\s*\{([^}]*)\}/g),
+      ].map((m) => [m[1], m[2], m.index! + m[0].indexOf("{") + 1] as const),
+      ...[...text.matchAll(/\\setkeys\s*\{Gin\}\s*\{([^}]*)\}/g)].map(
+        (m) => [m[1], "graphicx", m.index! + m[0].lastIndexOf("{") + 1] as const,
+      ),
+    ];
+    for (const [list, packages, start] of graphics) {
+      if (!/(^|,)\s*graphic[sx]\s*(,|$)/.test(packages)) continue;
+      for (const o of options(list, start)) {
+        if (o.name === "draft" || o.name === "draft=true") graphicsDraft ??= o.at;
+        if (o.name === "final" || o.name === "draft=false") graphicsFinal = true;
+      }
+    }
+  }
+  return graphicsDraft ?? (graphicsFinal ? null : classDraft);
 }
 /**
  * The document to compile when several files start with \documentclass, as templates

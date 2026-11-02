@@ -1713,6 +1713,29 @@ kbd {
 .output-spacer {
   flex: 1;
 }
+.pdf-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px 9px 16px;
+  font-size: var(--fs-ui);
+  line-height: 1.45;
+  background: var(--warning-soft);
+  border-bottom: 1px solid var(--border);
+}
+.pdf-notice > svg {
+  flex: none;
+  color: var(--warning);
+}
+.pdf-notice > span {
+  flex: 1;
+  min-width: 160px;
+}
+.pdf-notice code {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12.5px;
+}
 .missing-banner {
   display: flex;
   align-items: center;

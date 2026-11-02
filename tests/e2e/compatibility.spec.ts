@@ -127,6 +127,53 @@ test("a PDF built despite an error is shown, with that error listed first", asyn
   await expect(panel).not.toContainText("joy2024novel");
 });
 
+test("a document in draft mode explains its empty figures and fixes them in one click", async ({
+  page,
+}) => {
+  await installDesktopDouble(page, {
+    text: String.raw`\documentclass[journal, draft, twoside,web]{ieeecolor}` +
+      "\n\\usepackage{graphicx}\n\\begin{document}\\includegraphics{fig.png}\\end{document}",
+  });
+  await openProject(page);
+  await page.getByRole("button", { name: "Auto compile" }).click();
+  const notice = page.locator(".pdf-notice");
+  await page.locator(".compile-button").click();
+  await expect.poll(async () => (await recorded(page)).builds.length).toBe(1);
+  // Only once there is a PDF to explain.
+  await expect(notice).toHaveCount(0);
+  await page.evaluate(() => (window as any).testIPC.finish(true));
+  await expect(notice).toContainText(
+    "Figures show as empty boxes because this document uses the draft option.",
+  );
+  await notice.getByRole("button", { name: "Show figures" }).click();
+  const editor = page.getByRole("textbox", { name: "LaTeX source editor" });
+  await expect(editor).toContainText(String.raw`\documentclass[journal, final, twoside,web]{ieeecolor}`);
+  // The fix compiles straight away, with the change saved first.
+  await expect.poll(async () => (await recorded(page)).builds.length).toBe(2);
+  expect((await recorded(page)).builds[1].text).toContain("[journal, final, twoside,web]");
+  // Ctrl+Z brings draft back, as with any edit.
+  await editor.focus();
+  await page.keyboard.press("Control+z");
+  await expect(editor).toContainText("[journal, draft, twoside,web]");
+});
+
+test("the draft note can be dismissed for people who want draft mode", async ({ page }) => {
+  await installDesktopDouble(page, {
+    text: String.raw`\documentclass[draft]{article}` + "\n\\begin{document}Hi\\end{document}",
+  });
+  await openProject(page);
+  await page.getByRole("button", { name: "Auto compile" }).click();
+  await page.locator(".compile-button").click();
+  await expect.poll(async () => (await recorded(page)).builds.length).toBe(1);
+  await page.evaluate(() => (window as any).testIPC.finish(true));
+  const notice = page.locator(".pdf-notice");
+  await notice.getByRole("button", { name: "Keep draft mode" }).click();
+  await expect(notice).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "LaTeX source editor" })).toContainText(
+    String.raw`\documentclass[draft]{article}`,
+  );
+});
+
 test("previews compile quickly; export compiles once at full quality first", async ({
   page,
 }) => {
